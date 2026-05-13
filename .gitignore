@@ -4,7 +4,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
-data/raw/
 debug/
 logs/
-reports/
+debug/network/kis_auth_status_*.json

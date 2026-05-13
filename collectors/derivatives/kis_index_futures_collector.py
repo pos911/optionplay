@@ -11,12 +11,14 @@ from supabase import create_client
 from .common import (
     compute_raw_hash,
     current_timestamp,
+    hhmm_from_timestamp,
     load_api_keys_config,
     normalize_signed_number,
     normalize_trade_date,
     payload_with_status,
     save_csv,
     save_json,
+    time_fields_for_row,
 )
 
 SOURCE = "KIS"
@@ -208,7 +210,6 @@ class KISIndexFuturesCollector:
 
         snapshot_row = {
             "trade_date": normalized_trade_date,
-            "base_time": None,
             "market_type": "KOSPI200_INDEX_FUTURES",
             "futures_code": futures_code,
             "futures_name": futures_name,
@@ -235,6 +236,11 @@ class KISIndexFuturesCollector:
             "source_url": f"{base_url}{PRICE_URL_PATH}",
             "collected_at": collected_at,
             "raw_hash": compute_raw_hash(save_json.__globals__["json"].dumps(price_payload, ensure_ascii=False)),
+            **time_fields_for_row(
+                collected_at=collected_at,
+                base_time=output1.get("stck_cntg_hour") or output1.get("oprc_hour") or output1.get("acml_hour"),
+                source_time=output1.get("stck_cntg_hour") or output1.get("oprc_hour") or output1.get("acml_hour"),
+            ),
         }
 
         start_date = (date.fromisoformat(normalized_trade_date) - timedelta(days=14)).strftime("%Y%m%d")
@@ -260,6 +266,10 @@ class KISIndexFuturesCollector:
             daily_rows.append(
                 {
                     "trade_date": normalize_trade_date(row.get("stck_bsop_date"), fallback=date.fromisoformat(normalized_trade_date)),
+                    "base_time": hhmm_from_timestamp(collected_at),
+                    "base_time_source": "collected_at_fallback",
+                    "source_time": hhmm_from_timestamp(collected_at),
+                    "market_session": snapshot_row["market_session"],
                     "futures_code": futures_code,
                     "futures_name": futures_name,
                     "open_price": normalize_signed_number(row.get("futs_oprc")),

@@ -97,6 +97,9 @@ class TestCollectors(unittest.TestCase):
         target = {row["category"]: row for row in rows}
         self.assertEqual(target["KOSPI200_FUTURES"]["foreigner_net_buy"], -5350)
         self.assertEqual(target["KOSPI200_CALL_OPTIONS"]["institution_net_buy"], 0)
+        self.assertEqual(target["KOSPI200_FUTURES"]["base_time"], "10:00")
+        self.assertEqual(target["KOSPI200_FUTURES"]["base_time_source"], "collected_at_fallback")
+        self.assertEqual(target["KOSPI200_FUTURES"]["market_session"], "REGULAR")
 
     def test_parse_kb_market_index_html(self) -> None:
         collector = KBSECMarketIndexCollector()
@@ -106,6 +109,7 @@ class TestCollectors(unittest.TestCase):
         target = {row["standard_index_name"]: row for row in rows}
         self.assertEqual(target["KOSPI200"]["direction"], "DOWN")
         self.assertEqual(target["USDKRW"]["current_value"], 1360.5)
+        self.assertEqual(target["KOSPI200"]["base_time"], "10:00")
 
     def test_parse_hankyung_program_html(self) -> None:
         collector = HankyungProgramTradingCollector()
@@ -115,6 +119,7 @@ class TestCollectors(unittest.TestCase):
         target = {(row["market"], row["program_type"]): row for row in rows}
         self.assertEqual(target[("KOSPI", "ARBITRAGE")]["net_buy_value"], 17996)
         self.assertEqual(target[("KOSPI", "NON_ARBITRAGE")]["unit_value"], "백만원")
+        self.assertEqual(target[("KOSPI", "ARBITRAGE")]["base_time_source"], "collected_at_fallback")
 
     def test_build_report_files(self) -> None:
         with TemporaryDirectory() as tmpdir:

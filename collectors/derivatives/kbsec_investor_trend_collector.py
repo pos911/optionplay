@@ -23,6 +23,7 @@ from .common import (
     save_csv,
     save_json,
     save_text,
+    time_fields_for_row,
 )
 from .validators import validate_investor_flow
 
@@ -67,7 +68,6 @@ class KBSECInvestorTrendCollector:
                 rows.append(
                     {
                         "trade_date": trade_date,
-                        "base_time": None,
                         "category": category,
                         "foreigner_net_buy": normalize_signed_number(series.iloc[1] if len(series) > 1 else None),
                         "individual_net_buy": normalize_signed_number(series.iloc[2] if len(series) > 2 else None),
@@ -77,6 +77,7 @@ class KBSECInvestorTrendCollector:
                         "source_url": self.url,
                         "collected_at": collected_at,
                         "raw_hash": compute_raw_hash(html_text),
+                        **time_fields_for_row(collected_at=collected_at),
                     }
                 )
         return rows
@@ -108,7 +109,6 @@ class KBSECInvestorTrendCollector:
             rows.append(
                 {
                     "trade_date": trade_date,
-                    "base_time": None,
                     "category": category,
                     "foreigner_net_buy": normalize_signed_number(values[0]),
                     "individual_net_buy": normalize_signed_number(values[1]),
@@ -118,6 +118,7 @@ class KBSECInvestorTrendCollector:
                     "source_url": self.url,
                     "collected_at": collected_at,
                     "raw_hash": compute_raw_hash(html_text),
+                    **time_fields_for_row(collected_at=collected_at),
                 }
             )
             index += 4
@@ -230,6 +231,9 @@ class KBSECInvestorTrendCollector:
                 [
                     "trade_date",
                     "base_time",
+                    "base_time_source",
+                    "source_time",
+                    "market_session",
                     "category",
                     "foreigner_net_buy",
                     "individual_net_buy",
@@ -272,6 +276,9 @@ class KBSECInvestorTrendCollector:
                 [
                     "trade_date",
                     "base_time",
+                    "base_time_source",
+                    "source_time",
+                    "market_session",
                     "category",
                     "foreigner_net_buy",
                     "individual_net_buy",

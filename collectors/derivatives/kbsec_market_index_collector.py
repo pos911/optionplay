@@ -25,6 +25,7 @@ from .common import (
     save_csv,
     save_json,
     save_text,
+    time_fields_for_row,
 )
 from .validators import validate_market_index
 
@@ -71,7 +72,6 @@ class KBSECMarketIndexCollector:
                 rows.append(
                     {
                         "trade_date": trade_date,
-                        "base_time": None,
                         "group_name": group_name,
                         "index_name": raw_name,
                         "standard_index_name": self.standardize_index_name(raw_name),
@@ -85,6 +85,7 @@ class KBSECMarketIndexCollector:
                         "source_url": self.url,
                         "collected_at": collected_at,
                         "raw_hash": compute_raw_hash(html_text),
+                        **time_fields_for_row(collected_at=collected_at),
                     }
                 )
         return rows
@@ -117,7 +118,6 @@ class KBSECMarketIndexCollector:
                     rows.append(
                         {
                             "trade_date": trade_date,
-                            "base_time": None,
                             "group_name": current_group,
                             "index_name": raw_name,
                             "standard_index_name": self.standardize_index_name(raw_name),
@@ -131,6 +131,7 @@ class KBSECMarketIndexCollector:
                             "source_url": self.url,
                             "collected_at": collected_at,
                             "raw_hash": compute_raw_hash(html_text),
+                            **time_fields_for_row(collected_at=collected_at),
                         }
                     )
                     index += 3
@@ -242,6 +243,9 @@ class KBSECMarketIndexCollector:
                 [
                     "trade_date",
                     "base_time",
+                    "base_time_source",
+                    "source_time",
+                    "market_session",
                     "group_name",
                     "index_name",
                     "standard_index_name",
@@ -288,6 +292,9 @@ class KBSECMarketIndexCollector:
                 [
                     "trade_date",
                     "base_time",
+                    "base_time_source",
+                    "source_time",
+                    "market_session",
                     "group_name",
                     "index_name",
                     "standard_index_name",

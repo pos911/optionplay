@@ -1,0 +1,273 @@
+name: Collect Derivatives Market Data
+
+'on':
+  workflow_dispatch:
+    inputs:
+      commit_outputs:
+        description: "Commit generated reports and raw data"
+        required: false
+        default: "false"
+  schedule:
+    - cron: "20 * * * 1-5"
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Determine KST schedule guard
+        id: guard
+        shell: bash
+        run: |
+          KST_NOW=$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')
+          KST_DATE=$(TZ=Asia/Seoul date +%Y-%m-%d)
+          KST_HOUR=$(TZ=Asia/Seoul date +%H)
+          KST_MINUTE=$(TZ=Asia/Seoul date +%M)
+          KST_WEEKDAY=$(TZ=Asia/Seoul date +%u)
+          SHOULD_RUN=false
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SHOULD_RUN=true
+            echo "Manual dispatch bypassed KST time guard."
+          elif [ "$KST_WEEKDAY" -ge 1 ] && [ "$KST_WEEKDAY" -le 5 ] && [ "$KST_MINUTE" = "20" ] && [ "$KST_HOUR" -ge 7 ] && [ "$KST_HOUR" -le 17 ]; then
+            SHOULD_RUN=true
+          fi
+
+          echo "kst_now=$KST_NOW" >> "$GITHUB_OUTPUT"
+          echo "trade_date=$KST_DATE" >> "$GITHUB_OUTPUT"
+          echo "should_run=$SHOULD_RUN" >> "$GITHUB_OUTPUT"
+
+          if [ "$SHOULD_RUN" != "true" ]; then
+            echo "Skipped by KST time guard: $KST_NOW"
+          fi
+
+      - name: Stop when outside KST window
+        if: steps.guard.outputs.should_run != 'true'
+        shell: bash
+        run: |
+          echo "Skipped by KST time guard"
+
+      - name: Upgrade pip
+        if: steps.guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Install dependencies
+        if: steps.guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests pandas beautifulsoup4 lxml python-dotenv supabase playwright
+          fi
+
+      - name: Install Playwright Chromium
+        if: steps.guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          python -m playwright install chromium || true
+
+      - name: Restore api_keys.json
+        if: steps.guard.outputs.should_run == 'true'
+        shell: bash
+        env:
+          OPTIONPLAY_API_KEYS_JSON: ${{ secrets.OPTIONPLAY_API_KEYS_JSON }}
+        run: |
+          if [ -z "$OPTIONPLAY_API_KEYS_JSON" ]; then
+            echo "OPTIONPLAY_API_KEYS_JSON secret is empty"
+            exit 1
+          fi
+          printf '%s' "$OPTIONPLAY_API_KEYS_JSON" > api_keys.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("api_keys.json")
+          if not path.exists():
+              raise SystemExit("api_keys.json not created")
+
+          data = json.loads(path.read_text(encoding="utf-8"))
+
+          def has_path(obj, *keys):
+              cur = obj
+              for key in keys:
+                  if not isinstance(cur, dict) or key not in cur:
+                      return False
+                  cur = cur[key]
+              return bool(cur)
+
+          print("api_keys.json restored")
+          print("json_parse_ok=True")
+          print(f"has_kis_app_key={has_path(data, 'kis', 'app_key')}")
+          print(f"has_kis_app_secret={has_path(data, 'kis', 'app_secret')}")
+          print(f"has_supabase_url={has_path(data, 'supabase', 'url')}")
+          print(f"has_supabase_service_role_key={has_path(data, 'supabase', 'service_role_key')}")
+          print(f"top_level_keys_count={len(data.keys())}")
+          PY
+
+      - name: Run unit tests
+        if: steps.guard.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          python -m unittest tests.test_derivatives_collectors
+
+      - name: Collect derivatives market data
+        if: steps.guard.outputs.should_run == 'true'
+        shell: bash
+        env:
+          TRADE_DATE: ${{ steps.guard.outputs.trade_date }}
+        run: |
+          python scripts/collect_derivatives_market_data.py \
+            --trade-date "$TRADE_DATE" \
+            --output-root . \
+            --api-keys-path api_keys.json > collection_summary.json
+
+      - name: Cleanup secret file
+        if: always()
+        shell: bash
+        run: |
+          rm -f api_keys.json config/api_keys.json
+
+      - name: Commit generated outputs
+        if: steps.guard.outputs.should_run == 'true' && github.event_name == 'workflow_dispatch' && inputs.commit_outputs == 'true'
+        shell: bash
+        env:
+          TRADE_DATE: ${{ steps.guard.outputs.trade_date }}
+          KST_NOW: ${{ steps.guard.outputs.kst_now }}
+        run: |
+          git status --short
+          git add data/raw/*.json data/raw/*.csv reports/*.md reports/*.json reports/*.txt
+
+          if git diff --cached --name-only | grep -E '(^|/)(api_keys\.json|config/api_keys\.json|\.env|.*\.token)$'; then
+            echo "Secret-related file was staged unexpectedly"
+            exit 1
+          fi
+
+          if git diff --cached --name-only | grep -E '^(debug/|logs/)'; then
+            echo "debug or logs files were staged unexpectedly"
+            exit 1
+          fi
+
+          if git diff --cached --quiet; then
+            echo "No generated output changes to commit"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: collect derivatives market data $TRADE_DATE $(TZ=Asia/Seoul date +%H:%M) KST"
+          git push
+
+      - name: Upload artifacts
+        if: always() && steps.guard.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: derivatives-market-data-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            data/raw/*.json
+            data/raw/*.csv
+            reports/*.md
+            reports/*.json
+            reports/*.txt
+            logs/*.log
+            debug/*.html
+            debug/screenshots/*.png
+            debug/network/*.json
+
+      - name: Write workflow summary
+        if: always()
+        shell: bash
+        env:
+          KST_NOW: ${{ steps.guard.outputs.kst_now }}
+          TRADE_DATE: ${{ steps.guard.outputs.trade_date }}
+          SHOULD_RUN: ${{ steps.guard.outputs.should_run }}
+          COMMIT_OUTPUTS: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_outputs || 'false' }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          kst_now = os.environ.get("KST_NOW", "")
+          trade_date = os.environ.get("TRADE_DATE", "")
+          should_run = os.environ.get("SHOULD_RUN", "false")
+          commit_outputs = os.environ.get("COMMIT_OUTPUTS", "false")
+          artifact_name = f"derivatives-market-data-{os.environ.get('RUN_ID', '')}"
+
+          lines = [
+              "## Derivatives Collector Run",
+              "",
+              f"- kst_now: `{kst_now}`",
+              f"- trade_date: `{trade_date}`",
+              f"- commit_outputs: `{commit_outputs}`",
+              f"- artifact: `{artifact_name}`",
+          ]
+
+          if should_run != "true":
+              lines.extend([
+                  "",
+                  "- status: `Skipped by KST time guard`",
+              ])
+              summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+              raise SystemExit(0)
+
+          summary_file = Path("collection_summary.json")
+          if not summary_file.exists():
+              lines.extend([
+                  "",
+                  "- status: `collection_summary.json not found`",
+              ])
+              summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+              raise SystemExit(0)
+
+          payload = json.loads(summary_file.read_text(encoding="utf-8"))
+          results = payload.get("results", [])
+          success = [r.get("collector") for r in results if r.get("status") == "success"]
+          failed = [r.get("collector") for r in results if r.get("status") != "success"]
+          report_files = payload.get("report_files", {})
+          kis_auth = payload.get("kis_auth", {})
+
+          lines.extend([
+              "",
+              f"- successful_collectors: `{', '.join(success) if success else 'none'}`",
+              f"- failed_collectors: `{', '.join(failed) if failed else 'none'}`",
+              "",
+              "| collector | status | row_count |",
+              "| --- | --- | --- |",
+          ])
+          for result in results:
+              lines.append(f"| {result.get('collector')} | {result.get('status')} | {result.get('row_count')} |")
+
+          lines.extend([
+              "",
+              "### Reports",
+              "",
+              f"- markdown_report: `{report_files.get('markdown_report')}`",
+              f"- json_packet: `{report_files.get('json_packet')}`",
+              f"- llm_input_text: `{report_files.get('llm_input_text')}`",
+              "",
+              "### KIS Auth",
+              "",
+              f"- token_source: `{kis_auth.get('token_source')}`",
+              f"- token_received: `{kis_auth.get('token_received')}`",
+              f"- expires_at: `{kis_auth.get('expires_at')}`",
+          ])
+
+          summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY

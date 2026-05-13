@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -40,6 +41,7 @@ MAX_RETRIES = 2
 
 _LAST_REQUEST_BY_DOMAIN: dict[str, float] = {}
 _ROBOTS_CACHE: dict[tuple[str, str], bool | None] = {}
+KST = ZoneInfo("Asia/Seoul")
 
 
 @dataclass
@@ -245,7 +247,63 @@ def normalize_trade_date(value: str | None = None, *, fallback: date | None = No
 
 
 def current_timestamp() -> str:
-    return datetime.now().astimezone().isoformat()
+    return datetime.now(KST).isoformat()
+
+
+def parse_iso_timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value).astimezone(KST)
+
+
+def hhmm_from_timestamp(value: str) -> str:
+    return parse_iso_timestamp(value).strftime("%H:%M")
+
+
+def normalize_base_time_value(value: Any) -> str | None:
+    text = normalize_whitespace(value)
+    if not text:
+        return None
+    if re.fullmatch(r"\d{2}:\d{2}", text):
+        return text
+    if re.fullmatch(r"\d{4,6}", text):
+        if len(text) == 6:
+            text = text[:4]
+        return f"{text[:2]}:{text[2:4]}"
+    return None
+
+
+def classify_market_session(hhmm: str | None) -> str:
+    if not hhmm or not re.fullmatch(r"\d{2}:\d{2}", hhmm):
+        return "OUT_OF_SCOPE"
+    hour, minute = [int(part) for part in hhmm.split(":")]
+    total_minutes = hour * 60 + minute
+    if 7 * 60 + 20 <= total_minutes <= 8 * 60 + 59:
+        return "PRE_MARKET"
+    if 9 * 60 <= total_minutes <= 15 * 60 + 30:
+        return "REGULAR"
+    if 15 * 60 + 31 <= total_minutes <= 17 * 60 + 20:
+        return "POST_MARKET"
+    return "OUT_OF_SCOPE"
+
+
+def time_fields_for_row(
+    *,
+    collected_at: str,
+    base_time: Any = None,
+    source_time: Any = None,
+) -> dict[str, Any]:
+    normalized_base_time = normalize_base_time_value(base_time)
+    normalized_source_time = normalize_base_time_value(source_time)
+    base_time_source = "kis_response" if normalized_base_time else "collected_at_fallback"
+    if normalized_base_time is None:
+        normalized_base_time = hhmm_from_timestamp(collected_at)
+    if normalized_source_time is None:
+        normalized_source_time = normalized_base_time
+    return {
+        "base_time": normalized_base_time,
+        "base_time_source": base_time_source,
+        "source_time": normalized_source_time,
+        "market_session": classify_market_session(normalized_base_time),
+    }
 
 
 def compute_raw_hash(raw_text: str) -> str:

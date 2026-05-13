@@ -23,6 +23,7 @@ from .common import (
     save_csv,
     save_json,
     save_text,
+    time_fields_for_row,
 )
 from .validators import validate_program_trading
 
@@ -85,7 +86,6 @@ class HankyungProgramTradingCollector:
                 rows.append(
                     {
                         "trade_date": normalized_date,
-                        "base_time": "장마감" if normalized_date == page_trade_date else None,
                         "market": "KOSPI",
                         "program_type": program_type,
                         "sell_value": normalize_signed_number(series[sell_column]),
@@ -100,6 +100,11 @@ class HankyungProgramTradingCollector:
                         "source_url": self.url,
                         "collected_at": collected_at,
                         "raw_hash": raw_hash,
+                        **time_fields_for_row(
+                            collected_at=collected_at,
+                            base_time=None,
+                            source_time="15:30" if normalized_date == page_trade_date else None,
+                        ),
                     }
                 )
         return rows
@@ -140,7 +145,6 @@ class HankyungProgramTradingCollector:
                 rows.append(
                     {
                         "trade_date": normalized_date,
-                        "base_time": "장마감" if normalized_date == page_trade_date else None,
                         "market": "KOSPI",
                         "program_type": program_type,
                         "sell_value": sell_value,
@@ -155,6 +159,11 @@ class HankyungProgramTradingCollector:
                         "source_url": self.url,
                         "collected_at": collected_at,
                         "raw_hash": raw_hash,
+                        **time_fields_for_row(
+                            collected_at=collected_at,
+                            base_time=None,
+                            source_time="15:30" if normalized_date == page_trade_date else None,
+                        ),
                     }
                 )
         return rows
@@ -263,6 +272,9 @@ class HankyungProgramTradingCollector:
                 [
                     "trade_date",
                     "base_time",
+                    "base_time_source",
+                    "source_time",
+                    "market_session",
                     "market",
                     "program_type",
                     "sell_value",
@@ -310,6 +322,9 @@ class HankyungProgramTradingCollector:
                 [
                     "trade_date",
                     "base_time",
+                    "base_time_source",
+                    "source_time",
+                    "market_session",
                     "market",
                     "program_type",
                     "sell_value",

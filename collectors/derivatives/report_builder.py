@@ -113,11 +113,14 @@ def build_derivatives_data_report(
         "## KIS Futures Snapshot",
         "",
         _table(
-            ["futures_code", "futures_name", "current_price", "basis", "market_basis", "open_interest", "open_interest_change", "kospi200_index_value", "token_source"],
+            ["futures_code", "futures_name", "base_time", "base_time_source", "market_session", "current_price", "basis", "market_basis", "open_interest", "open_interest_change", "kospi200_index_value", "token_source"],
             [
                 [
                     row.get("futures_code"),
                     row.get("futures_name"),
+                    row.get("base_time"),
+                    row.get("base_time_source"),
+                    row.get("market_session"),
                     row.get("current_price"),
                     row.get("basis"),
                     row.get("market_basis"),
