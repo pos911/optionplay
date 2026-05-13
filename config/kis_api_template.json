@@ -1,0 +1,10 @@
+{
+  "app_key": "",
+  "app_secret": "",
+  "access_token": "",
+  "token_type": "Bearer",
+  "base_url": "https://openapi.koreainvestment.com:9443",
+  "account_no": "",
+  "account_product_code": "",
+  "notes": "Fill these values later. This template is intentionally empty and not used by the current web collectors."
+}

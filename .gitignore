@@ -1,0 +1,10 @@
+api_keys.json
+config/api_keys.json
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+data/raw/
+debug/
+logs/
+reports/
