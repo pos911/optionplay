@@ -5,6 +5,7 @@ import json
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -80,10 +81,33 @@ def build_output_paths(output_root: Path, trade_date: str, target_slot: str) -> 
     }
 
 
+def _existing_slot_is_healthy(packet_path: Path) -> bool:
+    if not packet_path.exists():
+        return False
+    try:
+        payload = json.loads(packet_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    report_status = payload.get("report_status")
+    if report_status not in {"LIVE", "DELAYED_LIVE"}:
+        return False
+
+    collection_status = payload.get("collection_status", [])
+    if not isinstance(collection_status, list):
+        return False
+
+    kis_result = next((item for item in collection_status if item.get("collector") == "kis_index_futures"), None)
+    if not kis_result or kis_result.get("status") != "success":
+        return False
+
+    return True
+
+
 def should_skip_existing_outputs(output_paths: dict[str, Path], force_overwrite: bool) -> bool:
     if force_overwrite:
         return False
-    return any(path.exists() for path in output_paths.values() if path.name.startswith("derivatives_market_"))
+    return _existing_slot_is_healthy(output_paths["json_packet"])
 
 
 def main() -> int:
@@ -115,6 +139,7 @@ def main() -> int:
             "one_line_judgement": None,
             "composite_derivatives_score": None,
             "data_quality_warnings": [],
+            "existing_slot_status": "LIVE_OR_DELAYED_LIVE",
             "log_path": str(output_paths["log_path"]),
         }
         print(json.dumps(summary, ensure_ascii=False, indent=2))

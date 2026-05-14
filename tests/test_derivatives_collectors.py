@@ -17,10 +17,10 @@ class TestTargetSlotWindow(unittest.TestCase):
         cases = {
             "2026-05-14T09:25:00+09:00": "0930",
             "2026-05-14T09:30:00+09:00": "0930",
-            "2026-05-14T09:40:00+09:00": "0930",
-            "2026-05-14T09:50:00+09:00": None,
-            "2026-05-14T14:58:00+09:00": None,
-            "2026-05-14T15:40:00+09:00": "1530",
+            "2026-05-14T09:58:00+09:00": "0930",
+            "2026-05-14T10:59:00+09:00": "1030",
+            "2026-05-14T11:00:00+09:00": None,
+            "2026-05-14T15:58:00+09:00": "1530",
             "2026-05-14T16:00:00+09:00": None,
         }
         for timestamp, expected in cases.items():
@@ -28,7 +28,7 @@ class TestTargetSlotWindow(unittest.TestCase):
                 self.assertEqual(resolve_target_slot_for_timestamp(timestamp), expected)
 
 
-class TestOutputPaths(unittest.TestCase):
+class TestOutputPathsAndDuplicateSkip(unittest.TestCase):
     def test_build_slot_suffix(self) -> None:
         self.assertEqual(build_slot_suffix("2026-05-14", "1430"), "20260514_1430")
 
@@ -37,13 +37,50 @@ class TestOutputPaths(unittest.TestCase):
         for path in output_paths.values():
             self.assertIn("20260514_1430", path.name)
 
-    def test_duplicate_skip_without_force(self) -> None:
+    def test_existing_live_packet_skips(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             output_paths = build_output_paths(root, "2026-05-14", "1430")
-            output_paths["markdown_report"].parent.mkdir(parents=True, exist_ok=True)
-            output_paths["markdown_report"].write_text("exists", encoding="utf-8")
+            output_paths["json_packet"].parent.mkdir(parents=True, exist_ok=True)
+            output_paths["json_packet"].write_text(
+                json.dumps(
+                    {
+                        "report_status": "LIVE",
+                        "collection_status": [
+                            {"collector": "kis_index_futures", "status": "success"},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
             self.assertTrue(should_skip_existing_outputs(output_paths, force_overwrite=False))
+
+    def test_existing_stale_packet_allows_overwrite(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_paths = build_output_paths(root, "2026-05-14", "1430")
+            output_paths["json_packet"].parent.mkdir(parents=True, exist_ok=True)
+            output_paths["json_packet"].write_text(
+                json.dumps(
+                    {
+                        "report_status": "STALE_TEST_RUN",
+                        "collection_status": [
+                            {"collector": "kis_index_futures", "status": "success"},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            self.assertFalse(should_skip_existing_outputs(output_paths, force_overwrite=False))
+
+    def test_force_overwrite_bypasses_skip(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_paths = build_output_paths(root, "2026-05-14", "1430")
+            output_paths["json_packet"].parent.mkdir(parents=True, exist_ok=True)
+            output_paths["json_packet"].write_text("{}", encoding="utf-8")
             self.assertFalse(should_skip_existing_outputs(output_paths, force_overwrite=True))
 
 
@@ -52,15 +89,15 @@ class TestKBSECMarketIndexCollector(unittest.TestCase):
         html = """
         <html><body>
         <table><tbody id="stockKr">
-          <tr data-code="KGG01P"><th>코스피 종합</th><td>0.000.00</td><td>▲ 137.40 (1.75%)</td></tr>
-          <tr data-code="K2G01P"><th>코스피 200</th><td>1,243.17</td><td>▲ 23.00 (1.88%)</td></tr>
+          <tr data-code="KGG01P"><th>코스피종합</th><td>0.000.00</td><td>▲ 137.40 (1.75%)</td></tr>
+          <tr data-code="K2G01P"><th>코스피200</th><td>1,243.17</td><td>▲ 23.00 (1.88%)</td></tr>
           <tr><th>2026-6</th><td>1,111.11</td><td>▲ 1.00 (0.10%)</td></tr>
         </tbody></table>
         <table><tbody id="stockEng">
           <tr data-code="NAS@IXIC"><th>NASDAQ</th><td>-</td><td> </td></tr>
         </tbody></table>
         <table><tbody id="stockEtc">
-          <tr data-code="USDKRWSMBS"><th>원/달러</th><td>1,491.20</td><td>▲ 0.60 (0.04%)</td></tr>
+          <tr data-code="USDKRWSMBS"><th>원달러</th><td>1,491.20</td><td>▲ 0.60 (0.04%)</td></tr>
         </tbody></table>
         </body></html>
         """
@@ -75,14 +112,14 @@ class TestKBSECMarketIndexCollector(unittest.TestCase):
         html = """
         <html><body>
         <table><tbody id="stockKr">
-          <tr data-code="K2G01P"><th>코스피 200</th><td>1,243.17</td><td>▲ 23.00 (1.88%)</td></tr>
+          <tr data-code="K2G01P"><th>코스피200</th><td>1,243.17</td><td>▲ 23.00 (1.88%)</td></tr>
           <tr data-code="A0166000"><th>KOSPI선물</th><td>1,232.60</td><td>▼ 12.90 (1.01%)</td></tr>
         </tbody></table>
         <table><tbody id="stockEng">
           <tr data-code="SPI@SPX"><th>S&P 500</th><td>7,480.05</td><td>▲ 35.80 (0.48%)</td></tr>
         </tbody></table>
         <table><tbody id="stockEtc">
-          <tr data-code="USDKRWSMBS"><th>원/달러</th><td>1,491.20</td><td>▲ 0.60 (0.04%)</td></tr>
+          <tr data-code="USDKRWSMBS"><th>원달러</th><td>1,491.20</td><td>▲ 0.60 (0.04%)</td></tr>
           <tr><th>2026-6</th><td>1,491.20</td><td>▲ 0.60 (0.04%)</td></tr>
         </tbody></table>
         </body></html>
@@ -91,6 +128,9 @@ class TestKBSECMarketIndexCollector(unittest.TestCase):
         validation = validate_market_index(rows)
         self.assertTrue(validation["valid"])
         self.assertEqual(skipped_rows, 1)
+        futures_row = next(row for row in rows if row["standard_index_name"] == "KOSPI_FUTURES")
+        self.assertEqual(futures_row["raw_data"]["change_rate"], -1.01)
+        self.assertEqual(futures_row["source_fields"]["detail_group"], "FUT")
 
 
 class TestReportBuilder(unittest.TestCase):
@@ -124,7 +164,8 @@ class TestReportBuilder(unittest.TestCase):
             "validation": {"valid": True, "errors": [], "row_count": 1},
         }
         futures_net = -12000 if futures_score_case in {"mixed", "negative"} else 12000
-        program_total = 6000 if futures_score_case == "mixed" else (-6000 if futures_score_case == "negative" else 6000)
+        program_total = 6000 if futures_score_case in {"mixed", "positive"} else -6000
+
         self._write_payload(
             root / "data" / "raw" / f"kbsec_investor_trend_{suffix}.json",
             {
@@ -138,11 +179,33 @@ class TestReportBuilder(unittest.TestCase):
                 ],
             },
         )
+
         index_rows = [
             {"standard_index_name": "KOSPI", "current_value": 2700.1, "change_rate": None if missing_rates else -0.8, "direction": "DOWN", "source_code": "KGG01P", "raw_change_text": "▲ 137.40 (1.75%)"},
             {"standard_index_name": "KOSDAQ", "current_value": 820.0, "change_rate": None if missing_rates else -1.0, "direction": "DOWN", "source_code": "QGG01P", "raw_change_text": "▲ 14.16 (1.20%)"},
             {"standard_index_name": "KOSPI200", "current_value": 355.4, "change_rate": 1.88 if divergent_rates else -0.9, "direction": "UP" if divergent_rates else "DOWN", "source_code": "K2G01P", "raw_change_text": "▲ 23.00 (1.88%)"},
-            {"standard_index_name": "KOSPI_FUTURES", "current_value": 354.8, "change_rate": -1.01 if divergent_rates else -1.1, "direction": "DOWN", "source_code": "A0166000", "raw_change_text": "▼ 12.90 (1.01%)"},
+            {
+                "standard_index_name": "KOSPI_FUTURES",
+                "index_name": "KOSPI선물",
+                "current_value": 354.8,
+                "change_value": -3.6,
+                "change_rate": -1.01 if divergent_rates else -1.1,
+                "direction": "DOWN",
+                "source_code": "A0166000",
+                "raw_current_value_text": "354.8",
+                "raw_change_text": "▼ 3.60 (1.01%)",
+                "raw_data": {
+                    "source_code": "A0166000",
+                    "current_value": 354.8,
+                    "change_value": -3.6,
+                    "change_rate": -1.01 if divergent_rates else -1.1,
+                },
+                "source_fields": {
+                    "data_code": "A0166000",
+                    "detail_group": "FUT",
+                    "realtime_feed_hint": "KBRSFFC0",
+                },
+            },
             {"standard_index_name": "USDKRW", "current_value": 1360.5, "change_rate": 0.35, "direction": "UP", "source_code": "USDKRWSMBS", "raw_change_text": "▲ 0.60 (0.04%)"},
             {"standard_index_name": "NASDAQ", "current_value": 18001.2, "change_rate": None if missing_rates else 0.56, "direction": "UP", "source_code": "NAS@IXIC", "raw_change_text": "▲ 37.09 (0.14%)"},
             {"standard_index_name": "SP500", "current_value": 5300.0, "change_rate": 0.42, "direction": "UP", "source_code": "SPI@SPX", "raw_change_text": "▲ 35.80 (0.48%)"},
@@ -157,6 +220,7 @@ class TestReportBuilder(unittest.TestCase):
                 "data": [] if kbsec_index_failed else index_rows,
             },
         )
+
         self._write_payload(
             root / "data" / "raw" / f"hankyung_program_trading_{suffix}.json",
             {
@@ -170,6 +234,7 @@ class TestReportBuilder(unittest.TestCase):
                 ],
             },
         )
+
         self._write_payload(
             root / "data" / "raw" / f"kis_index_futures_snapshot_{suffix}.json",
             {
@@ -179,6 +244,7 @@ class TestReportBuilder(unittest.TestCase):
                 "data": [{"futures_name": "F 202606", "basis": -1.2, "market_basis": -0.4, "open_interest": 199628, "open_interest_change": 6000}],
             },
         )
+
         self._write_payload(
             root / "data" / "raw" / f"kis_index_futures_daily_{suffix}.json",
             {
@@ -189,21 +255,50 @@ class TestReportBuilder(unittest.TestCase):
             },
         )
 
-    def test_stale_test_run_status(self) -> None:
+    def test_report_status_thresholds(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            self._prepare_payloads(root, lag_minutes=90)
+            self._prepare_payloads(root, lag_minutes=10)
             files = build_derivatives_data_report(
                 output_root=root,
                 trade_date="2026-05-14",
                 target_slot="1430",
-                collected_at="2026-05-14T16:00:00+09:00",
+                collected_at="2026-05-14T14:40:00+09:00",
+                collection_results=[{"collector": "kbsec_market_index", "status": "success"}, {"collector": "kis_index_futures", "status": "success"}],
+                kis_auth_result={"status": "success"},
+            )
+            packet = json.loads(Path(files["json_packet"]).read_text(encoding="utf-8"))
+            self.assertEqual(packet["report_status"], "LIVE")
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._prepare_payloads(root, lag_minutes=35)
+            files = build_derivatives_data_report(
+                output_root=root,
+                trade_date="2026-05-14",
+                target_slot="1430",
+                collected_at="2026-05-14T15:05:00+09:00",
+                collection_results=[{"collector": "kbsec_market_index", "status": "success"}, {"collector": "kis_index_futures", "status": "success"}],
+                kis_auth_result={"status": "success"},
+            )
+            packet = json.loads(Path(files["json_packet"]).read_text(encoding="utf-8"))
+            self.assertEqual(packet["report_status"], "DELAYED_LIVE")
+            self.assertTrue(packet["one_line_judgement"].startswith("지연 수집: "))
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._prepare_payloads(root, lag_minutes=536)
+            files = build_derivatives_data_report(
+                output_root=root,
+                trade_date="2026-05-14",
+                target_slot="1430",
+                collected_at="2026-05-14T23:26:00+09:00",
                 collection_results=[{"collector": "kbsec_market_index", "status": "success"}, {"collector": "kis_index_futures", "status": "success"}],
                 kis_auth_result={"status": "success"},
             )
             packet = json.loads(Path(files["json_packet"]).read_text(encoding="utf-8"))
             self.assertEqual(packet["report_status"], "STALE_TEST_RUN")
-            self.assertIn("지연 수집으로 장중 판단에는 부적합", packet["one_line_judgement"])
+            self.assertIn("장중 판단에는 부적합", packet["one_line_judgement"])
 
     def test_none_percent_is_not_rendered(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -236,7 +331,7 @@ class TestReportBuilder(unittest.TestCase):
             packet = json.loads(Path(files["json_packet"]).read_text(encoding="utf-8"))
             self.assertIn("혼조", packet["one_line_judgement"])
 
-    def test_data_quality_warning_for_divergent_rates(self) -> None:
+    def test_data_quality_warning_and_score_exclusion_for_divergent_rates(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             self._prepare_payloads(root, lag_minutes=10, divergent_rates=True)
@@ -251,6 +346,9 @@ class TestReportBuilder(unittest.TestCase):
             packet = json.loads(Path(files["json_packet"]).read_text(encoding="utf-8"))
             self.assertTrue(packet["data_quality_warnings"])
             self.assertIn("diverge sharply", packet["data_quality_warnings"][0])
+            self.assertTrue(packet["score_exclusions"])
+            self.assertIn("excluded from score calculation", packet["score_exclusions"][0])
+            self.assertFalse(packet["instrument_semantics"]["KOSPI_FUTURES"]["score_included"])
 
     def test_report_is_generated_when_kbsec_market_index_failed(self) -> None:
         with TemporaryDirectory() as tmpdir:

@@ -105,8 +105,12 @@ def _build_metrics(
         "usdkrw_change_rate": _to_number(fx.get("change_rate")),
         "foreigner_call_net_buy": _to_number(call_options.get("foreigner_net_buy")),
         "foreigner_put_net_buy": _to_number(put_options.get("foreigner_net_buy")),
-        "foreign_call_buy_put_sell_signal": 1.0 if _to_number(call_options.get("foreigner_net_buy")) > 0 and _to_number(put_options.get("foreigner_net_buy")) < 0 else 0.0,
-        "foreign_call_sell_put_buy_signal": 1.0 if _to_number(call_options.get("foreigner_net_buy")) < 0 and _to_number(put_options.get("foreigner_net_buy")) > 0 else 0.0,
+        "foreign_call_buy_put_sell_signal": 1.0
+        if _to_number(call_options.get("foreigner_net_buy")) > 0 and _to_number(put_options.get("foreigner_net_buy")) < 0
+        else 0.0,
+        "foreign_call_sell_put_buy_signal": 1.0
+        if _to_number(call_options.get("foreigner_net_buy")) < 0 and _to_number(put_options.get("foreigner_net_buy")) > 0
+        else 0.0,
     }
 
 
@@ -132,19 +136,53 @@ def _build_scores(metrics: dict[str, float], rules: dict[str, Any]) -> dict[str,
 
 
 def _build_report_status(schedule_lag_minutes: int) -> str:
-    if schedule_lag_minutes > 60:
+    if schedule_lag_minutes >= 60:
         return "STALE_TEST_RUN"
-    if schedule_lag_minutes > 15:
-        return "DELAYED_SNAPSHOT"
-    return "ON_TIME"
+    if schedule_lag_minutes >= 16:
+        return "DELAYED_LIVE"
+    return "LIVE"
 
 
-def _build_data_quality_warnings(index_rows: list[dict[str, Any]], collection_results: list[dict[str, Any]]) -> list[str]:
+def _build_kospi_futures_semantics(index_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    kospi_futures = _row_by_key(index_rows, "standard_index_name", "KOSPI_FUTURES")
+    if not kospi_futures:
+        return {
+            "available": False,
+            "semantics_confirmed": False,
+            "score_included": False,
+            "note": "KOSPI_FUTURES row was not collected.",
+        }
+
+    source_code = kospi_futures.get("source_code")
+    inferred_product = None
+    if source_code == "A0166000":
+        inferred_product = "KBSEC market page label KOSPI선물, detail link gbn=FUT, realtime feed KBRSFFC0"
+
+    return {
+        "available": True,
+        "source_code": source_code,
+        "index_name": kospi_futures.get("index_name"),
+        "raw_current_value_text": kospi_futures.get("raw_current_value_text"),
+        "raw_change_text": kospi_futures.get("raw_change_text"),
+        "current_value": kospi_futures.get("current_value"),
+        "change_value": kospi_futures.get("change_value"),
+        "change_rate": kospi_futures.get("change_rate"),
+        "direction": kospi_futures.get("direction"),
+        "inferred_product": inferred_product,
+        "semantics_confirmed": False,
+        "score_included": False,
+        "note": "Source identifies this row as a futures item, but exact contract-month and change-rate semantics remain unconfirmed.",
+    }
+
+
+def _build_data_quality_warnings(index_rows: list[dict[str, Any]], collection_results: list[dict[str, Any]]) -> tuple[list[str], list[str], dict[str, Any]]:
     warnings: list[str] = []
+    score_exclusions: list[str] = []
     index_result = next((result for result in collection_results if result.get("collector") == "kbsec_market_index"), {})
     if index_result.get("status") != "success":
         warnings.append("KBSEC 시장지수 수집 실패로 지수/환율 판단 신뢰도 낮음")
 
+    kospi_futures_semantics = _build_kospi_futures_semantics(index_rows)
     kospi200 = _row_by_key(index_rows, "standard_index_name", "KOSPI200")
     kospi_futures = _row_by_key(index_rows, "standard_index_name", "KOSPI_FUTURES")
     k200_rate = kospi200.get("change_rate")
@@ -156,7 +194,9 @@ def _build_data_quality_warnings(index_rows: list[dict[str, Any]], collection_re
             warnings.append(
                 "KOSPI200 and KOSPI_FUTURES change_rate directions diverge sharply. Verify KOSPI_FUTURES field semantics before using as live confirmation."
             )
-    return warnings
+            score_exclusions.append("KOSPI_FUTURES change_rate excluded from score calculation because its semantics are unconfirmed under divergent direction.")
+            kospi_futures_semantics["score_included"] = False
+    return warnings, score_exclusions, kospi_futures_semantics
 
 
 def _build_one_line_judgement(report_status: str, scores: dict[str, Any]) -> str:
@@ -167,24 +207,27 @@ def _build_one_line_judgement(report_status: str, scores: dict[str, Any]) -> str
 
     if report_status == "STALE_TEST_RUN":
         return "지연 수집으로 장중 판단에는 부적합하다. 이 결과는 backfill/test snapshot으로만 봐야 한다."
+
+    prefix = "지연 수집: " if report_status == "DELAYED_LIVE" else ""
+
     if futures_score < 0 < program_score:
-        return "선물 하방 압력과 프로그램 매수가 충돌하는 혼조 구간이다."
+        return prefix + "선물 하방 압력과 프로그램 매수가 충돌하는 혼조 구간이다."
     if futures_score > 0 > program_score:
-        return "선물 상방 압력과 프로그램 매도가 충돌하는 혼조 구간이다."
+        return prefix + "선물 상방 압력과 프로그램 매도가 충돌하는 혼조 구간이다."
 
     signs = {0 if score == 0 else (1 if score > 0 else -1) for score in [futures_score, options_score, program_score]}
     non_zero_signs = {sign for sign in signs if sign != 0}
     if len(non_zero_signs) > 1:
-        return "선물, 옵션, 프로그램 신호가 서로 엇갈려 장중 해석은 혼조에 가깝다."
+        return prefix + "선물, 옵션, 프로그램 신호가 엇갈리는 혼조 구간이다."
     if composite > 0 and futures_score < 0:
-        return "외국인 선물 하방 압력을 프로그램 매수가 일부 상쇄하는 구간이다."
+        return prefix + "프로그램 매수로 외국인 선물 하방 압력이 일부 상쇄되는 구간이다."
     if composite < 0 and futures_score > 0:
-        return "외국인 선물 상방 압력을 프로그램 매도가 일부 상쇄하는 구간이다."
+        return prefix + "프로그램 매도로 외국인 선물 상방 압력이 일부 상쇄되는 구간이다."
     if composite > 0:
-        return "파생 수급은 전반적으로 상방 우위다."
+        return prefix + "파생 수급은 전반적으로 상방 우위다."
     if composite < 0:
-        return "파생 수급은 전반적으로 하방 우위다."
-    return "뚜렷한 우위 없이 혼조 구간이다."
+        return prefix + "파생 수급은 전반적으로 하방 우위다."
+    return prefix + "뚜렷한 우위 없이 혼조 구간이다."
 
 
 def _build_interpretation(
@@ -195,6 +238,7 @@ def _build_interpretation(
     program_rows: list[dict[str, Any]],
     futures_rows: list[dict[str, Any]],
     scores: dict[str, Any],
+    score_exclusions: list[str],
 ) -> dict[str, Any]:
     futures = _row_by_key(investor_rows, "category", "KOSPI200_FUTURES")
     call_options = _row_by_key(investor_rows, "category", "KOSPI200_CALL_OPTIONS")
@@ -212,43 +256,50 @@ def _build_interpretation(
     total = _program_row(program_rows, "TOTAL")
     next_slot = next_target_slot(run_context.target_slot)
 
-    option_tone = "약상방/혼조"
+    option_tone = "약상방 또는 혼조"
     if _to_number(call_options.get("foreigner_net_buy")) > 0 and _to_number(put_options.get("foreigner_net_buy")) < 0:
         option_tone = "상방 베팅"
     elif _to_number(call_options.get("foreigner_net_buy")) < 0 and _to_number(put_options.get("foreigner_net_buy")) > 0:
-        option_tone = "하방/헤지"
+        option_tone = "하방 또는 헤지"
+
+    futures_sentence = (
+        f"외국인 선물 순매수는 {_fmt_value_or_missing(futures.get('foreigner_net_buy'))}, "
+        f"미결제약정 변화는 {_fmt_value_or_missing(futures_snapshot.get('open_interest_change'))}, "
+        f"basis는 {_fmt_value_or_missing(futures_snapshot.get('basis'))}, market_basis는 {_fmt_value_or_missing(futures_snapshot.get('market_basis'))}로 "
+        f"선물 수급 점수는 {scores['futures_flow_score']}이다."
+    )
+    options_sentence = (
+        f"외국인 콜 순매수는 {_fmt_value_or_missing(call_options.get('foreigner_net_buy'))}, "
+        f"풋 순매수는 {_fmt_value_or_missing(put_options.get('foreigner_net_buy'))}로 "
+        f"옵션 해석은 {option_tone}이며 옵션 점수는 {scores['options_flow_score']}이다."
+    )
+    program_sentence = (
+        f"KOSPI 차익은 {_fmt_value_or_missing(arbitrage.get('net_buy_value'))}, "
+        f"비차익은 {_fmt_value_or_missing(non_arbitrage.get('net_buy_value'))}, "
+        f"전체는 {_fmt_value_or_missing(total.get('net_buy_value'))}로 프로그램 점수는 {scores['program_flow_score']}이다."
+    )
+    macro_sentence = (
+        f"KOSPI {_fmt_pct(kospi.get('change_rate'))}, "
+        f"KOSDAQ {_fmt_pct(kosdaq.get('change_rate'))}, "
+        f"KOSPI200 {_fmt_pct(kospi200.get('change_rate'))}, "
+        f"KOSPI futures {_fmt_pct(kospi_futures.get('change_rate'))}, "
+        f"USDKRW {_fmt_pct(usdkrw.get('change_rate'))}, "
+        f"NASDAQ {_fmt_pct(nasdaq.get('change_rate'))}, "
+        f"SP500 {_fmt_pct(sp500.get('change_rate'))}. "
+        f"환율 리스크 점수는 {scores['fx_risk_score']}이다."
+    )
+    if score_exclusions:
+        macro_sentence += " " + " ".join(score_exclusions)
 
     return {
         "one_line_judgement": _build_one_line_judgement(report_status, scores),
-        "futures_view": (
-            f"외국인 선물 순매수는 {_fmt_value_or_missing(futures.get('foreigner_net_buy'))}, "
-            f"미결제약정 변화는 {_fmt_value_or_missing(futures_snapshot.get('open_interest_change'))}다. "
-            f"basis {_fmt_value_or_missing(futures_snapshot.get('basis'))}와 market_basis {_fmt_value_or_missing(futures_snapshot.get('market_basis'))}를 감안하면 "
-            f"선물 수급 점수는 {scores['futures_flow_score']}이다."
-        ),
-        "options_view": (
-            f"외국인 콜 순매수 {_fmt_value_or_missing(call_options.get('foreigner_net_buy'))}, "
-            f"풋 순매수 {_fmt_value_or_missing(put_options.get('foreigner_net_buy'))} 기준 옵션 해석은 {option_tone}이며 "
-            f"옵션 점수는 {scores['options_flow_score']}이다."
-        ),
-        "program_view": (
-            f"KOSPI 차익 {_fmt_value_or_missing(arbitrage.get('net_buy_value'))}, "
-            f"비차익 {_fmt_value_or_missing(non_arbitrage.get('net_buy_value'))}, "
-            f"전체 {_fmt_value_or_missing(total.get('net_buy_value'))} 기준 프로그램 점수는 {scores['program_flow_score']}이다."
-        ),
-        "macro_view": (
-            f"KOSPI {_fmt_pct(kospi.get('change_rate'))}, "
-            f"KOSDAQ {_fmt_pct(kosdaq.get('change_rate'))}, "
-            f"KOSPI200 {_fmt_pct(kospi200.get('change_rate'))}, "
-            f"KOSPI futures {_fmt_pct(kospi_futures.get('change_rate'))}, "
-            f"USDKRW {_fmt_pct(usdkrw.get('change_rate'))}, "
-            f"NASDAQ {_fmt_pct(nasdaq.get('change_rate'))}, "
-            f"SP500 {_fmt_pct(sp500.get('change_rate'))}. "
-            f"환율 리스크 점수는 {scores['fx_risk_score']}이다."
-        ),
+        "futures_view": futures_sentence,
+        "options_view": options_sentence,
+        "program_view": program_sentence,
+        "macro_view": macro_sentence,
         "next_checkpoint": (
-            f"다음 체크포인트는 {slot_to_hhmm(next_slot) if next_slot else '장 마감 이후'}다. "
-            f"외국인 선물 방향 지속 여부, 비차익 강도 변화, 콜/풋 전환 여부를 확인한다."
+            f"다음 체크포인트는 {slot_to_hhmm(next_slot) if next_slot else '장마감 이후'}다. "
+            f"외국인 선물 방향 지속 여부, 비차익 강도 변화, 콜/풋 방향 전환 여부를 확인한다."
         ),
     }
 
@@ -291,8 +342,17 @@ def build_derivatives_data_report(
     rules = _load_rules(root)
     metrics = _build_metrics(key_investor_rows, key_index_rows, latest_program_rows, kis_futures_snapshot_rows)
     scores = _build_scores(metrics, rules)
-    data_quality_warnings = _build_data_quality_warnings(key_index_rows, collection_results)
-    interpretation = _build_interpretation(run_context, report_status, key_investor_rows, key_index_rows, latest_program_rows, kis_futures_snapshot_rows, scores)
+    data_quality_warnings, score_exclusions, kospi_futures_semantics = _build_data_quality_warnings(key_index_rows, collection_results)
+    interpretation = _build_interpretation(
+        run_context,
+        report_status,
+        key_investor_rows,
+        key_index_rows,
+        latest_program_rows,
+        kis_futures_snapshot_rows,
+        scores,
+        score_exclusions,
+    )
 
     warnings: list[str] = []
     if run_context.schedule_lag_minutes > 15:
@@ -316,6 +376,7 @@ def build_derivatives_data_report(
         "report_status": report_status,
         "warning": "\n".join(warnings) if warnings else None,
         "data_quality_warnings": data_quality_warnings,
+        "score_exclusions": score_exclusions,
         "generated_from": [result.get("collector") for result in collection_results],
         "collection_status": collection_results,
         "kis_auth": kis_auth_result,
@@ -323,6 +384,9 @@ def build_derivatives_data_report(
         "source_payloads": {
             "kbsec_market_index": index_payload,
             "kis_index_futures_snapshot": kis_futures_snapshot_payload,
+        },
+        "instrument_semantics": {
+            "KOSPI_FUTURES": kospi_futures_semantics,
         },
         **interpretation,
         "investor_flow_focus": key_investor_rows,
@@ -371,7 +435,7 @@ def build_derivatives_data_report(
         "",
         interpretation["program_view"],
         "",
-        "## 지수/환율 환경",
+        "## 지수 및 환율 환경",
         "",
         interpretation["macro_view"],
         "",
@@ -382,6 +446,28 @@ def build_derivatives_data_report(
         "## Data Quality Warnings",
         "",
         *(data_quality_warnings if data_quality_warnings else ["None"]),
+        "",
+        "## Score Exclusions",
+        "",
+        *(score_exclusions if score_exclusions else ["None"]),
+        "",
+        "## KOSPI_FUTURES Semantics",
+        "",
+        _table(
+            ["field", "value"],
+            [
+                ["source_code", kospi_futures_semantics.get("source_code")],
+                ["index_name", kospi_futures_semantics.get("index_name")],
+                ["current_value", kospi_futures_semantics.get("current_value")],
+                ["change_value", kospi_futures_semantics.get("change_value")],
+                ["change_rate", _fmt_pct(kospi_futures_semantics.get("change_rate"))],
+                ["raw_change_text", kospi_futures_semantics.get("raw_change_text")],
+                ["inferred_product", kospi_futures_semantics.get("inferred_product")],
+                ["semantics_confirmed", kospi_futures_semantics.get("semantics_confirmed")],
+                ["score_included", kospi_futures_semantics.get("score_included")],
+                ["note", kospi_futures_semantics.get("note")],
+            ],
+        ),
         "",
         "## Market Index Focus",
         "",

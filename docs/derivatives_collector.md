@@ -1,55 +1,85 @@
 # Derivatives Collector
 
-## 목적
+## Purpose
 
-- 선물·옵션 수급으로 보는 시장상황 분석용 원천 데이터를 수집합니다.
-- 이 레이어는 수집, 정규화, 파일 생성, LLM 입력 패킷 생성만 담당합니다.
-- 시장 판단 로직, 매수/매도 의견, 투자 의견은 포함하지 않습니다.
+- Collect intraday derivatives source data needed for Korea options and futures interpretation.
+- Generate raw packets, markdown reports, and LLM input text per `trade_date + target_slot`.
+- Preserve retry-safe scheduled outputs without overwriting a healthy live slot result.
 
-## 수집 소스
+## Sources
 
-- KB증권 투자자별 매매동향
-- KB증권 지수정보
-- 한경 프로그램 매매
-- KIS 선물 스냅샷 및 KOSPI200 정규선물 프론트월 일봉
+- KBSEC investor trend
+- KBSEC market index
+- Hankyung program trading
+- KIS index futures snapshot and daily futures data
 
-## GitHub Secret 설정
+## GitHub Secret
 
-1. GitHub 저장소의 `Settings > Secrets and variables > Actions`로 이동합니다.
-2. `New repository secret`를 클릭합니다.
-3. Secret 이름을 `OPTIONPLAY_API_KEYS_JSON`으로 입력합니다.
-4. Secret 값에는 로컬 `api_keys.json` 파일의 전체 내용을 그대로 넣습니다.
+1. Open `Settings > Secrets and variables > Actions`.
+2. Create `OPTIONPLAY_API_KEYS_JSON`.
+3. Paste the full local `api_keys.json` content as the secret value.
 
-## GitHub Actions 실행 주기
+## GitHub Actions Schedule
 
-- 평일 KST `07:20`부터 `17:20`까지 매시간 `20분`에 실행됩니다.
-- 예약 트리거는 UTC cron으로 넓게 잡고, workflow 내부에서 `Asia/Seoul` 시간 가드를 다시 적용합니다.
-- 한국시간 기준으로 평일이 아니거나 `07:20~17:20` 범위가 아니면 수집을 건너뜁니다.
+- Scheduled cron stays at `25,30,35,40 0-6 * * 1-5`.
+- The KST guard maps these retry windows:
+- `09:25~09:59 -> 0930`
+- `10:25~10:59 -> 1030`
+- `11:25~11:59 -> 1130`
+- `12:25~12:59 -> 1230`
+- `13:25~13:59 -> 1330`
+- `14:25~14:59 -> 1430`
+- `15:25~15:59 -> 1530`
+- Any other time is skipped.
 
-## 수동 실행
+## Report Status Policy
 
-- GitHub `Actions` 탭에서 `Collect Derivatives Market Data` workflow를 수동 실행할 수 있습니다.
-- `commit_outputs` 입력값의 기본값은 `false`입니다.
-- `commit_outputs=true`일 때만 `data/raw`와 `reports` 산출물을 커밋합니다.
+- `schedule_lag_minutes <= 15`: `LIVE`
+- `16 <= schedule_lag_minutes <= 59`: `DELAYED_LIVE`
+- `schedule_lag_minutes >= 60`: `STALE_TEST_RUN`
 
-## 실행 명령
+## Manual Run
+
+- `workflow_dispatch` accepts optional `trade_date`, `target_slot`, `commit_outputs`, and `force_overwrite`.
+- If `target_slot` is omitted in `workflow_dispatch`, the workflow derives it from the current KST time using the same slot window rules.
+- If manual execution starts outside every slot window and no explicit `target_slot` is provided, the run is skipped by the guard.
+
+## Duplicate Slot Handling
+
+- Existing files alone do not block a retry anymore.
+- A scheduled or manual run is skipped only when the existing slot packet already has:
+- `report_status` in `LIVE` or `DELAYED_LIVE`
+- `kis_index_futures` collector status `success`
+- If the existing packet is `STALE_TEST_RUN` or the core futures collector failed, overwrite is allowed.
+- `force_overwrite=true` always overwrites.
+
+## Scheduled Run Verification Checklist
+
+1. Confirm the latest workflow run uses a commit at or after `d850c5c`.
+2. If the scheduled run starts during KST `09:25~09:59`, confirm `target_slot=0930`.
+3. Open `collection_summary.json` or the workflow summary and confirm `report_status` is `LIVE` or `DELAYED_LIVE`.
+4. Confirm `schedule_lag_minutes <= 15` maps to `LIVE`, `16~59` maps to `DELAYED_LIVE`, and `>= 60` maps to `STALE_TEST_RUN`.
+5. Confirm `reports/` and `data/raw/` contain files named with `YYYYMMDD_HHMM`.
+6. If multiple retries fire for the same slot, confirm later retries print `slot already collected` after a healthy live packet already exists.
+
+## Commands
 
 ```bash
-python -m unittest tests.test_derivatives_collectors
-python scripts/collect_derivatives_market_data.py --trade-date YYYY-MM-DD --output-root . --api-keys-path api_keys.json
+python -m unittest discover -s tests -v
+python scripts/collect_derivatives_market_data.py --trade-date YYYY-MM-DD --target-slot 1430 --output-root . --api-keys-path api_keys.json
 ```
 
-## 산출물
+## Outputs
 
 - `data/raw`
 - `reports`
 - `logs`
 - `debug`
-- GitHub Actions artifact 이름: `derivatives-market-data-<run_id>`
+- GitHub Actions artifact name: `derivatives-market-data-<run_id>-<trade_date>-<target_slot>`
 
-## 보안 주의사항
+## KOSPI_FUTURES Note
 
-- `api_keys.json`과 `config/api_keys.json`은 커밋하지 않습니다.
-- KIS token 원문은 로그에 출력하지 않습니다.
-- `debug/network`에는 token 원문 대신 `token_received`, `token_type`, `expires_at`, `token_source` 수준만 저장합니다.
-- `commit_outputs=true`여도 `debug`, `logs`, `api_keys.json`, `.env`, `*.token`은 커밋 대상에 포함하지 않습니다.
+- `source_code=A0166000` is labeled as `KOSPI선물` in the KBSEC page.
+- The page also links it through `gbn=FUT` and subscribes it to realtime feed `KBRSFFC0`.
+- That is strong evidence this row is a futures product, but the exact contract-month and `change_rate` semantics are still treated as unconfirmed.
+- When `KOSPI200` and `KOSPI_FUTURES` directions diverge sharply, the report flags the mismatch and excludes the `KOSPI_FUTURES change_rate` from score use.

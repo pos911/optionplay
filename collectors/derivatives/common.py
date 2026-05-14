@@ -340,7 +340,7 @@ def resolve_target_slot_for_timestamp(timestamp: str) -> str | None:
     total_minutes = actual_dt.hour * 60 + actual_dt.minute
     for slot in VALID_TARGET_SLOTS:
         slot_minutes = int(slot[:2]) * 60 + int(slot[2:])
-        if slot_minutes - 5 <= total_minutes <= slot_minutes + 19:
+        if slot_minutes - 5 <= total_minutes <= slot_minutes + 29:
             return slot
     return None
 

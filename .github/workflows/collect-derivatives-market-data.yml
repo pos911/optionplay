@@ -44,6 +44,23 @@ jobs:
         id: guard
         shell: bash
         run: |
+          resolve_slot() {
+            local hhmm="$1"
+            local hour="${hhmm:0:2}"
+            local minute="${hhmm:2:2}"
+            local total_minutes=$((10#$hour * 60 + 10#$minute))
+            for slot in 0930 1030 1130 1230 1330 1430 1530; do
+              local slot_hour="${slot:0:2}"
+              local slot_minute="${slot:2:2}"
+              local slot_total=$((10#$slot_hour * 60 + 10#$slot_minute))
+              if [ "$total_minutes" -ge $((slot_total - 5)) ] && [ "$total_minutes" -le $((slot_total + 29)) ]; then
+                echo "$slot"
+                return 0
+              fi
+            done
+            echo ""
+          }
+
           KST_NOW=$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M:%S %Z')
           KST_DATE=$(TZ=Asia/Seoul date +%Y-%m-%d)
           KST_TIME=$(TZ=Asia/Seoul date +%H:%M)
@@ -57,18 +74,17 @@ jobs:
           TARGET_SLOT_INPUT="${{ github.event_name == 'workflow_dispatch' && inputs.target_slot || '' }}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            SHOULD_RUN=true
-            TARGET_SLOT="$TARGET_SLOT_INPUT"
+            if [ -n "$TARGET_SLOT_INPUT" ]; then
+              SHOULD_RUN=true
+              TARGET_SLOT="$TARGET_SLOT_INPUT"
+            else
+              TARGET_SLOT=$(resolve_slot "$KST_HHMM")
+              if [ -n "$TARGET_SLOT" ]; then
+                SHOULD_RUN=true
+              fi
+            fi
           elif [ "$KST_WEEKDAY" -ge 1 ] && [ "$KST_WEEKDAY" -le 5 ]; then
-            case "$KST_HHMM" in
-              0925|0930|0935|0940) TARGET_SLOT="0930" ;;
-              1025|1030|1035|1040) TARGET_SLOT="1030" ;;
-              1125|1130|1135|1140) TARGET_SLOT="1130" ;;
-              1225|1230|1235|1240) TARGET_SLOT="1230" ;;
-              1325|1330|1335|1340) TARGET_SLOT="1330" ;;
-              1425|1430|1435|1440) TARGET_SLOT="1430" ;;
-              1525|1530|1535|1540) TARGET_SLOT="1530" ;;
-            esac
+            TARGET_SLOT=$(resolve_slot "$KST_HHMM")
             if [ -n "$TARGET_SLOT" ]; then
               SHOULD_RUN=true
             fi
