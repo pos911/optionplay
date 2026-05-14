@@ -176,7 +176,11 @@ def _sanitize_numeric_candidate(cleaned: str) -> str | None:
         return None
 
     # Date-like fragments can be accidentally extracted from malformed HTML tables.
-    if re.fullmatch(r"\d{4}[-./]\d{1,2}([-.]\d{1,2})?", cleaned):
+    # Do not treat a single dot as a date separator because values like 2700.1 and
+    # 1360.5 are valid index/FX decimals.
+    if re.fullmatch(r"\d{4}[-/]\d{1,2}([-/]\d{1,2})?", cleaned):
+        return None
+    if re.fullmatch(r"\d{4}\.\d{1,2}\.\d{1,2}", cleaned):
         return None
 
     if cleaned.count(".") > 1:
