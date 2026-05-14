@@ -40,8 +40,9 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             SHOULD_RUN=true
             echo "Manual dispatch bypassed KST time guard."
-          elif [ "$KST_WEEKDAY" -ge 1 ] && [ "$KST_WEEKDAY" -le 5 ] && [ "$KST_MINUTE" = "20" ] && [ "$KST_HOUR" -ge 7 ] && [ "$KST_HOUR" -le 17 ]; then
+          elif [ "$KST_WEEKDAY" -ge 1 ] && [ "$KST_WEEKDAY" -le 5 ] && [ "$KST_HOUR" -ge 7 ] && [ "$KST_HOUR" -le 17 ]; then
             SHOULD_RUN=true
+            echo "Scheduled run accepted by KST hour guard. Actual minute=$KST_MINUTE."
           fi
 
           echo "kst_now=$KST_NOW" >> "$GITHUB_OUTPUT"
