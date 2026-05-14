@@ -45,6 +45,23 @@ SAMPLE_KB_INDEX_HTML = """
 </body></html>
 """
 
+SAMPLE_KB_INDEX_HTML_WITH_NOISE = """
+<html><body>
+<table>
+  <tr><td>공지</td><td>2026-6</td><td>0.000.00</td></tr>
+</table>
+<table>
+  <tr><td>코스피 200</td><td>355.44</td><td>▼ 1.11 (0.31%)</td></tr>
+  <tr><td>KOSPI선물</td><td>354.80</td><td>▲ 0.20 (0.06%)</td></tr>
+  <tr><td>잘못된 행</td><td>2026-6</td><td>0.000.00</td></tr>
+</table>
+<table>
+  <tr><td>원/달러</td><td>1,360.50</td><td>▼ 2.10 (0.15%)</td></tr>
+</table>
+15 ~ 20분 지연 또는 종가지수입니다.
+</body></html>
+"""
+
 SAMPLE_HANKYUNG_HTML = """
 <html><body>
 단위 : 백만원, 2026.05.13 장마감
@@ -82,6 +99,8 @@ class TestCommonHelpers(unittest.TestCase):
         self.assertEqual(normalize_signed_number("▲ 200.86"), 200.86)
         self.assertEqual(normalize_signed_number("▼ 2.36"), -2.36)
         self.assertIsNone(normalize_signed_number("N/A"))
+        self.assertEqual(normalize_signed_number("0.000.00"), 0)
+        self.assertIsNone(normalize_signed_number("2026-6"))
 
 
 class TestCollectors(unittest.TestCase):
@@ -110,6 +129,17 @@ class TestCollectors(unittest.TestCase):
         self.assertEqual(target["KOSPI200"]["direction"], "DOWN")
         self.assertEqual(target["USDKRW"]["current_value"], 1360.5)
         self.assertEqual(target["KOSPI200"]["base_time"], "10:00")
+
+    def test_parse_kb_market_index_html_with_noise(self) -> None:
+        collector = KBSECMarketIndexCollector()
+        rows = collector.parse_with_pandas(SAMPLE_KB_INDEX_HTML_WITH_NOISE, "2026-05-13", "2026-05-13T10:00:00+09:00")
+        validation = validate_market_index(rows)
+        self.assertTrue(validation["valid"])
+        target = {row["standard_index_name"]: row for row in rows}
+        self.assertEqual(target["KOSPI200"]["current_value"], 355.44)
+        self.assertEqual(target["KOSPI_FUTURES"]["current_value"], 354.8)
+        self.assertEqual(target["USDKRW"]["current_value"], 1360.5)
+        self.assertNotIn("잘못된 행", {row["index_name"] for row in rows})
 
     def test_parse_hankyung_program_html(self) -> None:
         collector = HankyungProgramTradingCollector()
