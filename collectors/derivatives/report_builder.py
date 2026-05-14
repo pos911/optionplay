@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
-from .common import load_json, save_json, save_text
+from .common import build_run_context, build_slot_suffix, load_json, next_target_slot, save_json, save_text, slot_to_hhmm
 
 
 def _format_value(value: Any) -> str:
-    if value is None:
-        return "null"
-    return str(value)
+    return "null" if value is None else str(value)
 
 
 def _table(headers: list[str], rows: list[list[Any]]) -> str:
@@ -19,22 +18,263 @@ def _table(headers: list[str], rows: list[list[Any]]) -> str:
     return "\n".join(lines)
 
 
+def _clamp(value: int, low: int, high: int) -> int:
+    return max(low, min(high, value))
+
+
+def _load_rules(root: Path) -> dict[str, Any]:
+    candidates = [
+        root / "config" / "derivatives_report_rules.json",
+        Path(__file__).resolve().parents[2] / "config" / "derivatives_report_rules.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return json.loads(candidate.read_text(encoding="utf-8"))
+    raise FileNotFoundError("derivatives_report_rules.json not found")
+
+
+def _eval_op(left: float, op: str, right: float) -> bool:
+    if op == ">=":
+        return left >= right
+    if op == "<=":
+        return left <= right
+    if op == ">":
+        return left > right
+    if op == "<":
+        return left < right
+    if op == "==":
+        return left == right
+    raise ValueError(f"Unsupported operator: {op}")
+
+
+def _score_from_rules(metrics: dict[str, float], rules: list[dict[str, Any]]) -> tuple[int, list[str]]:
+    score = 0
+    reasons: list[str] = []
+    for rule in rules:
+        metric_value = float(metrics.get(rule["metric"], 0))
+        if _eval_op(metric_value, rule["op"], float(rule["value"])):
+            score += int(rule["score"])
+            reasons.append(rule["label"])
+    return score, reasons
+
+
+def _row_by_key(rows: list[dict[str, Any]], key: str, value: str) -> dict[str, Any]:
+    return next((row for row in rows if row.get(key) == value), {})
+
+
+def _program_row(rows: list[dict[str, Any]], program_type: str) -> dict[str, Any]:
+    return next((row for row in rows if row.get("market") == "KOSPI" and row.get("program_type") == program_type), {})
+
+
+def _to_number(value: Any) -> float:
+    if value in {None, ""}:
+        return 0.0
+    return float(value)
+
+
+def _fmt_pct(value: Any) -> str:
+    if value in {None, ""}:
+        return "데이터 없음"
+    return f"{float(value):.2f}%"
+
+
+def _fmt_value_or_missing(value: Any) -> str:
+    return "미수집" if value in {None, ""} else str(value)
+
+
+def _build_metrics(
+    investor_rows: list[dict[str, Any]],
+    index_rows: list[dict[str, Any]],
+    program_rows: list[dict[str, Any]],
+    futures_rows: list[dict[str, Any]],
+) -> dict[str, float]:
+    futures = _row_by_key(investor_rows, "category", "KOSPI200_FUTURES")
+    call_options = _row_by_key(investor_rows, "category", "KOSPI200_CALL_OPTIONS")
+    put_options = _row_by_key(investor_rows, "category", "KOSPI200_PUT_OPTIONS")
+    fx = _row_by_key(index_rows, "standard_index_name", "USDKRW")
+    futures_snapshot = futures_rows[0] if futures_rows else {}
+
+    return {
+        "foreigner_net_buy": _to_number(futures.get("foreigner_net_buy")),
+        "institution_net_buy": _to_number(futures.get("institution_net_buy")),
+        "individual_net_buy": _to_number(futures.get("individual_net_buy")),
+        "open_interest_change": _to_number(futures_snapshot.get("open_interest_change")),
+        "basis_minus_market_basis": _to_number(futures_snapshot.get("basis")) - _to_number(futures_snapshot.get("market_basis")),
+        "program_total_net_buy": _to_number(_program_row(program_rows, "TOTAL").get("net_buy_value")),
+        "program_non_arbitrage_net_buy": _to_number(_program_row(program_rows, "NON_ARBITRAGE").get("net_buy_value")),
+        "usdkrw_change_rate": _to_number(fx.get("change_rate")),
+        "foreigner_call_net_buy": _to_number(call_options.get("foreigner_net_buy")),
+        "foreigner_put_net_buy": _to_number(put_options.get("foreigner_net_buy")),
+        "foreign_call_buy_put_sell_signal": 1.0 if _to_number(call_options.get("foreigner_net_buy")) > 0 and _to_number(put_options.get("foreigner_net_buy")) < 0 else 0.0,
+        "foreign_call_sell_put_buy_signal": 1.0 if _to_number(call_options.get("foreigner_net_buy")) < 0 and _to_number(put_options.get("foreigner_net_buy")) > 0 else 0.0,
+    }
+
+
+def _build_scores(metrics: dict[str, float], rules: dict[str, Any]) -> dict[str, Any]:
+    futures_flow_score, futures_reasons = _score_from_rules(metrics, rules["futures_flow_rules"])
+    options_flow_score, options_reasons = _score_from_rules(metrics, rules["options_flow_rules"])
+    program_flow_score, program_reasons = _score_from_rules(metrics, rules["program_flow_rules"])
+    fx_risk_score, fx_reasons = _score_from_rules(metrics, rules["fx_risk_rules"])
+    composite = _clamp(futures_flow_score + options_flow_score + program_flow_score + fx_risk_score, -10, 10)
+    return {
+        "futures_flow_score": _clamp(futures_flow_score, -5, 5),
+        "options_flow_score": _clamp(options_flow_score, -5, 5),
+        "program_flow_score": _clamp(program_flow_score, -5, 5),
+        "fx_risk_score": _clamp(fx_risk_score, -5, 5),
+        "composite_derivatives_score": composite,
+        "score_reasons": {
+            "futures": futures_reasons,
+            "options": options_reasons,
+            "program": program_reasons,
+            "fx": fx_reasons,
+        },
+    }
+
+
+def _build_report_status(schedule_lag_minutes: int) -> str:
+    if schedule_lag_minutes > 60:
+        return "STALE_TEST_RUN"
+    if schedule_lag_minutes > 15:
+        return "DELAYED_SNAPSHOT"
+    return "ON_TIME"
+
+
+def _build_data_quality_warnings(index_rows: list[dict[str, Any]], collection_results: list[dict[str, Any]]) -> list[str]:
+    warnings: list[str] = []
+    index_result = next((result for result in collection_results if result.get("collector") == "kbsec_market_index"), {})
+    if index_result.get("status") != "success":
+        warnings.append("KBSEC 시장지수 수집 실패로 지수/환율 판단 신뢰도 낮음")
+
+    kospi200 = _row_by_key(index_rows, "standard_index_name", "KOSPI200")
+    kospi_futures = _row_by_key(index_rows, "standard_index_name", "KOSPI_FUTURES")
+    k200_rate = kospi200.get("change_rate")
+    fut_rate = kospi_futures.get("change_rate")
+    if k200_rate not in {None, ""} and fut_rate not in {None, ""}:
+        k200_rate = float(k200_rate)
+        fut_rate = float(fut_rate)
+        if abs(k200_rate) >= 0.5 and abs(fut_rate) >= 0.5 and (k200_rate > 0 > fut_rate or k200_rate < 0 < fut_rate):
+            warnings.append(
+                "KOSPI200 and KOSPI_FUTURES change_rate directions diverge sharply. Verify KOSPI_FUTURES field semantics before using as live confirmation."
+            )
+    return warnings
+
+
+def _build_one_line_judgement(report_status: str, scores: dict[str, Any]) -> str:
+    futures_score = scores["futures_flow_score"]
+    options_score = scores["options_flow_score"]
+    program_score = scores["program_flow_score"]
+    composite = scores["composite_derivatives_score"]
+
+    if report_status == "STALE_TEST_RUN":
+        return "지연 수집으로 장중 판단에는 부적합하다. 이 결과는 backfill/test snapshot으로만 봐야 한다."
+    if futures_score < 0 < program_score:
+        return "선물 하방 압력과 프로그램 매수가 충돌하는 혼조 구간이다."
+    if futures_score > 0 > program_score:
+        return "선물 상방 압력과 프로그램 매도가 충돌하는 혼조 구간이다."
+
+    signs = {0 if score == 0 else (1 if score > 0 else -1) for score in [futures_score, options_score, program_score]}
+    non_zero_signs = {sign for sign in signs if sign != 0}
+    if len(non_zero_signs) > 1:
+        return "선물, 옵션, 프로그램 신호가 서로 엇갈려 장중 해석은 혼조에 가깝다."
+    if composite > 0 and futures_score < 0:
+        return "외국인 선물 하방 압력을 프로그램 매수가 일부 상쇄하는 구간이다."
+    if composite < 0 and futures_score > 0:
+        return "외국인 선물 상방 압력을 프로그램 매도가 일부 상쇄하는 구간이다."
+    if composite > 0:
+        return "파생 수급은 전반적으로 상방 우위다."
+    if composite < 0:
+        return "파생 수급은 전반적으로 하방 우위다."
+    return "뚜렷한 우위 없이 혼조 구간이다."
+
+
+def _build_interpretation(
+    run_context: Any,
+    report_status: str,
+    investor_rows: list[dict[str, Any]],
+    index_rows: list[dict[str, Any]],
+    program_rows: list[dict[str, Any]],
+    futures_rows: list[dict[str, Any]],
+    scores: dict[str, Any],
+) -> dict[str, Any]:
+    futures = _row_by_key(investor_rows, "category", "KOSPI200_FUTURES")
+    call_options = _row_by_key(investor_rows, "category", "KOSPI200_CALL_OPTIONS")
+    put_options = _row_by_key(investor_rows, "category", "KOSPI200_PUT_OPTIONS")
+    kospi = _row_by_key(index_rows, "standard_index_name", "KOSPI")
+    kosdaq = _row_by_key(index_rows, "standard_index_name", "KOSDAQ")
+    kospi200 = _row_by_key(index_rows, "standard_index_name", "KOSPI200")
+    kospi_futures = _row_by_key(index_rows, "standard_index_name", "KOSPI_FUTURES")
+    usdkrw = _row_by_key(index_rows, "standard_index_name", "USDKRW")
+    nasdaq = _row_by_key(index_rows, "standard_index_name", "NASDAQ")
+    sp500 = _row_by_key(index_rows, "standard_index_name", "SP500")
+    futures_snapshot = futures_rows[0] if futures_rows else {}
+    arbitrage = _program_row(program_rows, "ARBITRAGE")
+    non_arbitrage = _program_row(program_rows, "NON_ARBITRAGE")
+    total = _program_row(program_rows, "TOTAL")
+    next_slot = next_target_slot(run_context.target_slot)
+
+    option_tone = "약상방/혼조"
+    if _to_number(call_options.get("foreigner_net_buy")) > 0 and _to_number(put_options.get("foreigner_net_buy")) < 0:
+        option_tone = "상방 베팅"
+    elif _to_number(call_options.get("foreigner_net_buy")) < 0 and _to_number(put_options.get("foreigner_net_buy")) > 0:
+        option_tone = "하방/헤지"
+
+    return {
+        "one_line_judgement": _build_one_line_judgement(report_status, scores),
+        "futures_view": (
+            f"외국인 선물 순매수는 {_fmt_value_or_missing(futures.get('foreigner_net_buy'))}, "
+            f"미결제약정 변화는 {_fmt_value_or_missing(futures_snapshot.get('open_interest_change'))}다. "
+            f"basis {_fmt_value_or_missing(futures_snapshot.get('basis'))}와 market_basis {_fmt_value_or_missing(futures_snapshot.get('market_basis'))}를 감안하면 "
+            f"선물 수급 점수는 {scores['futures_flow_score']}이다."
+        ),
+        "options_view": (
+            f"외국인 콜 순매수 {_fmt_value_or_missing(call_options.get('foreigner_net_buy'))}, "
+            f"풋 순매수 {_fmt_value_or_missing(put_options.get('foreigner_net_buy'))} 기준 옵션 해석은 {option_tone}이며 "
+            f"옵션 점수는 {scores['options_flow_score']}이다."
+        ),
+        "program_view": (
+            f"KOSPI 차익 {_fmt_value_or_missing(arbitrage.get('net_buy_value'))}, "
+            f"비차익 {_fmt_value_or_missing(non_arbitrage.get('net_buy_value'))}, "
+            f"전체 {_fmt_value_or_missing(total.get('net_buy_value'))} 기준 프로그램 점수는 {scores['program_flow_score']}이다."
+        ),
+        "macro_view": (
+            f"KOSPI {_fmt_pct(kospi.get('change_rate'))}, "
+            f"KOSDAQ {_fmt_pct(kosdaq.get('change_rate'))}, "
+            f"KOSPI200 {_fmt_pct(kospi200.get('change_rate'))}, "
+            f"KOSPI futures {_fmt_pct(kospi_futures.get('change_rate'))}, "
+            f"USDKRW {_fmt_pct(usdkrw.get('change_rate'))}, "
+            f"NASDAQ {_fmt_pct(nasdaq.get('change_rate'))}, "
+            f"SP500 {_fmt_pct(sp500.get('change_rate'))}. "
+            f"환율 리스크 점수는 {scores['fx_risk_score']}이다."
+        ),
+        "next_checkpoint": (
+            f"다음 체크포인트는 {slot_to_hhmm(next_slot) if next_slot else '장 마감 이후'}다. "
+            f"외국인 선물 방향 지속 여부, 비차익 강도 변화, 콜/풋 전환 여부를 확인한다."
+        ),
+    }
+
+
 def build_derivatives_data_report(
     *,
     output_root: str | Path,
     trade_date: str,
+    target_slot: str,
+    collected_at: str,
     collection_results: list[dict[str, Any]],
     kis_auth_result: dict[str, Any] | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     root = Path(output_root)
     reports_dir = root / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    investor_payload = load_json(root / "data" / "raw" / f"kbsec_investor_trend_{trade_date.replace('-', '')}.json")
-    index_payload = load_json(root / "data" / "raw" / f"kbsec_market_index_{trade_date.replace('-', '')}.json")
-    program_payload = load_json(root / "data" / "raw" / f"hankyung_program_trading_{trade_date.replace('-', '')}.json")
-    kis_futures_snapshot_payload = load_json(root / "data" / "raw" / f"kis_index_futures_snapshot_{trade_date.replace('-', '')}.json")
-    kis_futures_daily_payload = load_json(root / "data" / "raw" / f"kis_index_futures_daily_{trade_date.replace('-', '')}.json")
+    run_context = build_run_context(trade_date=trade_date, target_slot=target_slot, collected_at=collected_at)
+    file_suffix = build_slot_suffix(trade_date, target_slot)
+    report_status = _build_report_status(run_context.schedule_lag_minutes)
+
+    investor_payload = load_json(root / "data" / "raw" / f"kbsec_investor_trend_{file_suffix}.json")
+    index_payload = load_json(root / "data" / "raw" / f"kbsec_market_index_{file_suffix}.json")
+    program_payload = load_json(root / "data" / "raw" / f"hankyung_program_trading_{file_suffix}.json")
+    kis_futures_snapshot_payload = load_json(root / "data" / "raw" / f"kis_index_futures_snapshot_{file_suffix}.json")
+    kis_futures_daily_payload = load_json(root / "data" / "raw" / f"kis_index_futures_daily_{file_suffix}.json")
 
     investor_rows = investor_payload.get("data", [])
     index_rows = index_payload.get("data", [])
@@ -44,176 +284,127 @@ def build_derivatives_data_report(
 
     key_categories = {"KOSPI200_FUTURES", "KOSPI200_CALL_OPTIONS", "KOSPI200_PUT_OPTIONS"}
     key_investor_rows = [row for row in investor_rows if row.get("category") in key_categories]
-    key_indices = {"KOSPI", "KOSDAQ", "KOSPI200", "KOSDAQ150", "KOSPI_FUTURES", "USDKRW", "NASDAQ", "SP500"}
+    key_indices = {"KOSPI", "KOSDAQ", "KOSPI200", "KOSPI_FUTURES", "USDKRW", "NASDAQ", "SP500"}
     key_index_rows = [row for row in index_rows if row.get("standard_index_name") in key_indices]
-    latest_program_rows = [
-        row
-        for row in program_rows
-        if row.get("trade_date") == trade_date and row.get("market") == "KOSPI"
-    ]
+    latest_program_rows = [row for row in program_rows if row.get("trade_date") == trade_date and row.get("market") == "KOSPI"]
+
+    rules = _load_rules(root)
+    metrics = _build_metrics(key_investor_rows, key_index_rows, latest_program_rows, kis_futures_snapshot_rows)
+    scores = _build_scores(metrics, rules)
+    data_quality_warnings = _build_data_quality_warnings(key_index_rows, collection_results)
+    interpretation = _build_interpretation(run_context, report_status, key_investor_rows, key_index_rows, latest_program_rows, kis_futures_snapshot_rows, scores)
+
+    warnings: list[str] = []
+    if run_context.schedule_lag_minutes > 15:
+        warnings.append(
+            f"WARNING: This snapshot was collected {run_context.schedule_lag_minutes} minutes after "
+            f"target_slot={run_context.target_slot}. Use as delayed snapshot, not exact {slot_to_hhmm(run_context.target_slot)} data."
+        )
+    warnings.extend(data_quality_warnings)
 
     summary_payload = {
-        "trade_date": trade_date,
+        "trade_date": run_context.trade_date,
+        "target_slot": run_context.target_slot,
+        "generated_at": run_context.generated_at,
+        "collected_at": run_context.collected_at,
+        "actual_kst_time": run_context.actual_kst_time,
+        "schedule_lag_minutes": run_context.schedule_lag_minutes,
+        "market_session": run_context.market_session,
+        "source_time": run_context.source_time,
+        "base_time": run_context.base_time,
+        "base_time_source": run_context.base_time_source,
+        "report_status": report_status,
+        "warning": "\n".join(warnings) if warnings else None,
+        "data_quality_warnings": data_quality_warnings,
         "generated_from": [result.get("collector") for result in collection_results],
         "collection_status": collection_results,
         "kis_auth": kis_auth_result,
+        "scores": scores,
+        "source_payloads": {
+            "kbsec_market_index": index_payload,
+            "kis_index_futures_snapshot": kis_futures_snapshot_payload,
+        },
+        **interpretation,
         "investor_flow_focus": key_investor_rows,
         "market_index_focus": key_index_rows,
         "program_trading_focus": latest_program_rows,
         "kis_futures_snapshot_focus": kis_futures_snapshot_rows,
         "kis_futures_daily_focus": kis_futures_daily_rows[:5],
-        "notes": [
-            "This bundle contains source data only.",
-            "No investment opinion, market direction judgment, or forecast is included.",
-            "Use these values as input to a later analysis step.",
-        ],
     }
 
     md_lines = [
-        "# Derivatives Market Data Packet",
+        "# Derivatives Market Snapshot Report",
         "",
-        f"- trade_date: `{trade_date}`",
-        f"- generated_at: `{investor_payload.get('collected_at') or index_payload.get('collected_at')}`",
-        "- scope: `source data only`",
-        "- interpretation: `not included`",
+        *(["## Warning", "", *warnings, ""] if warnings else []),
+        f"- trade_date: `{run_context.trade_date}`",
+        f"- target_slot: `{run_context.target_slot}`",
+        f"- actual_kst_time: `{run_context.actual_kst_time}`",
+        f"- schedule_lag_minutes: `{run_context.schedule_lag_minutes}`",
+        f"- report_status: `{report_status}`",
         "",
-        "## Collection Status",
+        "## 오늘의 파생시장 한줄판단",
+        "",
+        interpretation["one_line_judgement"],
+        "",
+        "## 판단 강도 점수",
         "",
         _table(
-            ["collector", "status", "row_count", "requests_success", "playwright_used", "error_message"],
+            ["score", "value"],
             [
-                [
-                    result.get("collector"),
-                    result.get("status"),
-                    result.get("row_count"),
-                    result.get("requests_success"),
-                    result.get("playwright_used"),
-                    result.get("error_message"),
-                ]
-                for result in collection_results
+                ["futures_flow_score", scores["futures_flow_score"]],
+                ["options_flow_score", scores["options_flow_score"]],
+                ["program_flow_score", scores["program_flow_score"]],
+                ["fx_risk_score", scores["fx_risk_score"]],
+                ["composite_derivatives_score", scores["composite_derivatives_score"]],
             ],
         ),
         "",
-        "## KIS Auth Check",
+        "## 선물 수급 판단",
         "",
-        _table(
-            ["status", "config_path", "base_url", "token_received", "expires_at", "error_message"],
-            [
-                [
-                    (kis_auth_result or {}).get("status"),
-                    (kis_auth_result or {}).get("config_path"),
-                    (kis_auth_result or {}).get("base_url"),
-                    (kis_auth_result or {}).get("token_received"),
-                    (kis_auth_result or {}).get("expires_at"),
-                    (kis_auth_result or {}).get("error_message"),
-                ]
-            ],
-        ),
+        interpretation["futures_view"],
         "",
-        "## KIS Futures Snapshot",
+        "## 옵션 수급 판단",
         "",
-        _table(
-            ["futures_code", "futures_name", "base_time", "base_time_source", "market_session", "current_price", "basis", "market_basis", "open_interest", "open_interest_change", "kospi200_index_value", "token_source"],
-            [
-                [
-                    row.get("futures_code"),
-                    row.get("futures_name"),
-                    row.get("base_time"),
-                    row.get("base_time_source"),
-                    row.get("market_session"),
-                    row.get("current_price"),
-                    row.get("basis"),
-                    row.get("market_basis"),
-                    row.get("open_interest"),
-                    row.get("open_interest_change"),
-                    row.get("kospi200_index_value"),
-                    row.get("token_source"),
-                ]
-                for row in kis_futures_snapshot_rows
-            ],
-        ),
+        interpretation["options_view"],
         "",
-        "## Investor Flow Focus",
+        "## 프로그램매매 판단",
         "",
-        _table(
-            ["category", "foreigner_net_buy", "individual_net_buy", "institution_net_buy", "unit"],
-            [
-                [
-                    row.get("category"),
-                    row.get("foreigner_net_buy"),
-                    row.get("individual_net_buy"),
-                    row.get("institution_net_buy"),
-                    row.get("unit"),
-                ]
-                for row in key_investor_rows
-            ],
-        ),
+        interpretation["program_view"],
+        "",
+        "## 지수/환율 환경",
+        "",
+        interpretation["macro_view"],
+        "",
+        "## 다음 슬롯 체크포인트",
+        "",
+        interpretation["next_checkpoint"],
+        "",
+        "## Data Quality Warnings",
+        "",
+        *(data_quality_warnings if data_quality_warnings else ["None"]),
         "",
         "## Market Index Focus",
         "",
         _table(
-            ["group_name", "index_name", "standard_index_name", "current_value", "change_value", "change_rate", "direction"],
+            ["standard_index_name", "current_value", "change_rate", "direction", "source_code", "raw_change_text"],
             [
                 [
-                    row.get("group_name"),
-                    row.get("index_name"),
                     row.get("standard_index_name"),
                     row.get("current_value"),
-                    row.get("change_value"),
-                    row.get("change_rate"),
+                    _fmt_pct(row.get("change_rate")),
                     row.get("direction"),
+                    row.get("source_code"),
+                    row.get("raw_change_text"),
                 ]
                 for row in key_index_rows
             ],
         ),
         "",
-        "## Program Trading Focus",
-        "",
-        _table(
-            ["market", "program_type", "buy_value", "sell_value", "net_buy_value", "unit_value"],
-            [
-                [
-                    row.get("market"),
-                    row.get("program_type"),
-                    row.get("buy_value"),
-                    row.get("sell_value"),
-                    row.get("net_buy_value"),
-                    row.get("unit_value"),
-                ]
-                for row in latest_program_rows
-            ],
-        ),
-        "",
-        "## KIS Futures Daily",
-        "",
-        _table(
-            ["trade_date", "futures_code", "open_price", "high_price", "low_price", "close_price", "accumulated_volume", "accumulated_trading_value"],
-            [
-                [
-                    row.get("trade_date"),
-                    row.get("futures_code"),
-                    row.get("open_price"),
-                    row.get("high_price"),
-                    row.get("low_price"),
-                    row.get("close_price"),
-                    row.get("accumulated_volume"),
-                    row.get("accumulated_trading_value"),
-                ]
-                for row in kis_futures_daily_rows[:5]
-            ],
-        ),
-        "",
-        "## LLM Input Block",
-        "",
-        "```json",
-        save_json.__globals__["json"].dumps(summary_payload, ensure_ascii=False, indent=2),
-        "```",
-        "",
     ]
 
-    md_path = reports_dir / f"derivatives_market_data_report_{trade_date.replace('-', '')}.md"
-    json_path = reports_dir / f"derivatives_market_data_packet_{trade_date.replace('-', '')}.json"
-    txt_path = reports_dir / f"derivatives_market_llm_input_{trade_date.replace('-', '')}.txt"
+    md_path = reports_dir / f"derivatives_market_data_report_{file_suffix}.md"
+    json_path = reports_dir / f"derivatives_market_data_packet_{file_suffix}.json"
+    txt_path = reports_dir / f"derivatives_market_llm_input_{file_suffix}.txt"
 
     save_text(md_path, "\n".join(md_lines))
     save_json(json_path, summary_payload)
@@ -221,10 +412,14 @@ def build_derivatives_data_report(
         txt_path,
         "\n".join(
             [
-                "DERIVATIVES MARKET DATA INPUT",
-                f"trade_date={trade_date}",
-                "This file contains source data only. Do not assume any market interpretation is already applied.",
-                save_json.__globals__["json"].dumps(summary_payload, ensure_ascii=False, indent=2),
+                "DERIVATIVES MARKET SNAPSHOT INPUT",
+                f"trade_date={run_context.trade_date}",
+                f"target_slot={run_context.target_slot}",
+                f"report_status={report_status}",
+                f"actual_kst_time={run_context.actual_kst_time}",
+                f"composite_derivatives_score={scores['composite_derivatives_score']}",
+                interpretation["one_line_judgement"],
+                json.dumps(summary_payload, ensure_ascii=False, indent=2),
             ]
         ),
     )
@@ -233,4 +428,8 @@ def build_derivatives_data_report(
         "markdown_report": str(md_path),
         "json_packet": str(json_path),
         "llm_input_text": str(txt_path),
+        "report_status": report_status,
+        "one_line_judgement": interpretation["one_line_judgement"],
+        "composite_derivatives_score": scores["composite_derivatives_score"],
+        "data_quality_warnings": data_quality_warnings,
     }

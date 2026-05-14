@@ -11,9 +11,12 @@ import pandas as pd
 from .common import (
     PLAYWRIGHT_USER_AGENT,
     PLAYWRIGHT_VIEWPORT,
+    build_run_context,
+    build_slot_suffix,
     compute_raw_hash,
     create_requests_session,
     current_timestamp,
+    enrich_row_with_run_context,
     extract_text_lines,
     normalize_signed_number,
     normalize_trade_date,
@@ -216,17 +219,19 @@ class HankyungProgramTradingCollector:
             self.logger.warning("Playwright fallback failed for Hankyung program trading: %s", exc)
         return artifacts
 
-    def collect(self, trade_date: str | None = None) -> dict[str, Any]:
+    def collect(self, trade_date: str | None = None, target_slot: str = "0930", collected_at: str | None = None) -> dict[str, Any]:
         session = create_requests_session()
-        collected_at = current_timestamp()
+        collected_at = collected_at or current_timestamp()
         normalized_trade_date = normalize_trade_date(trade_date)
+        run_context = build_run_context(trade_date=normalized_trade_date, target_slot=target_slot, collected_at=collected_at)
+        file_suffix = build_slot_suffix(normalized_trade_date, target_slot)
 
         debug_dir = self.output_root / "debug"
         raw_dir = self.output_root / "data" / "raw"
         html_debug_path = debug_dir / "hankyung_program_trading_raw.html"
         text_debug_path = debug_dir / "hankyung_program_trading_parsed.txt"
-        json_path = raw_dir / f"hankyung_program_trading_{normalized_trade_date.replace('-', '')}.json"
-        csv_path = raw_dir / f"hankyung_program_trading_{normalized_trade_date.replace('-', '')}.csv"
+        json_path = raw_dir / f"hankyung_program_trading_{file_suffix}.json"
+        csv_path = raw_dir / f"hankyung_program_trading_{file_suffix}.csv"
 
         artifacts: dict[str, str] = {}
         rows: list[dict[str, Any]] = []
@@ -248,6 +253,8 @@ class HankyungProgramTradingCollector:
                 artifacts["parsed_text"] = save_text(text_debug_path, "\n".join(extract_text_lines(html_text)))
                 self.logger.info("Hankyung program trading parsed with text fallback: %s rows", len(rows))
 
+            rows = [enrich_row_with_run_context(row, run_context) for row in rows]
+
             validation = validate_program_trading(rows)
             status = "success" if validation["valid"] else "failed"
             if not validation["valid"]:
@@ -262,6 +269,7 @@ class HankyungProgramTradingCollector:
                 source_url=self.url,
                 data=rows,
                 status=status,
+                run_context=run_context,
                 error_message=error_message,
                 validation=validation,
             )
@@ -271,6 +279,10 @@ class HankyungProgramTradingCollector:
                 rows,
                 [
                     "trade_date",
+                    "target_slot",
+                    "generated_at",
+                    "actual_kst_time",
+                    "schedule_lag_minutes",
                     "base_time",
                     "base_time_source",
                     "source_time",
@@ -312,6 +324,7 @@ class HankyungProgramTradingCollector:
                 source_url=self.url,
                 data=[],
                 status="failed",
+                run_context=run_context,
                 error_message=error_message,
                 validation={"valid": False, "errors": [error_message], "row_count": 0},
             )
@@ -321,6 +334,10 @@ class HankyungProgramTradingCollector:
                 [],
                 [
                     "trade_date",
+                    "target_slot",
+                    "generated_at",
+                    "actual_kst_time",
+                    "schedule_lag_minutes",
                     "base_time",
                     "base_time_source",
                     "source_time",

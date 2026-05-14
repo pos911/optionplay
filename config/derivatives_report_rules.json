@@ -1,0 +1,27 @@
+{
+  "futures_flow_rules": [
+    { "metric": "foreigner_net_buy", "op": ">=", "value": 5000, "score": 2, "label": "외국인 선물 순매수 +5000 이상" },
+    { "metric": "foreigner_net_buy", "op": "<=", "value": -5000, "score": -2, "label": "외국인 선물 순매도 -5000 이하" },
+    { "metric": "foreigner_net_buy", "op": "<=", "value": -10000, "score": -1, "label": "외국인 선물 순매도 -10000 이하 추가 감점" },
+    { "metric": "open_interest_change", "op": ">=", "value": 3000, "score": 1, "label": "미결제약정 증가" },
+    { "metric": "open_interest_change", "op": "<=", "value": -3000, "score": -1, "label": "미결제약정 감소" },
+    { "metric": "basis_minus_market_basis", "op": ">=", "value": 0.5, "score": 1, "label": "basis 우위" },
+    { "metric": "basis_minus_market_basis", "op": "<=", "value": -0.5, "score": -1, "label": "market_basis 우위" }
+  ],
+  "options_flow_rules": [
+    { "metric": "foreign_call_buy_put_sell_signal", "op": ">=", "value": 1, "score": 2, "label": "외국인 콜 순매수와 풋 순매도 동시 발생" },
+    { "metric": "foreign_call_sell_put_buy_signal", "op": ">=", "value": 1, "score": -2, "label": "외국인 콜 순매도와 풋 순매수 동시 발생" },
+    { "metric": "foreigner_call_net_buy", "op": ">=", "value": 100, "score": 1, "label": "외국인 콜 순매수 우위" },
+    { "metric": "foreigner_put_net_buy", "op": ">=", "value": 100, "score": -1, "label": "외국인 풋 순매수 우위" }
+  ],
+  "program_flow_rules": [
+    { "metric": "program_total_net_buy", "op": ">=", "value": 3000, "score": 2, "label": "프로그램 전체 순매수 +3000 이상" },
+    { "metric": "program_total_net_buy", "op": "<=", "value": -3000, "score": -2, "label": "프로그램 전체 순매도 -3000 이하" },
+    { "metric": "program_non_arbitrage_net_buy", "op": ">=", "value": 3000, "score": 1, "label": "비차익 순매수 우위" },
+    { "metric": "program_non_arbitrage_net_buy", "op": "<=", "value": -3000, "score": -1, "label": "비차익 순매도 우위" }
+  ],
+  "fx_risk_rules": [
+    { "metric": "usdkrw_change_rate", "op": ">=", "value": 0.3, "score": -1, "label": "원달러 상승률 +0.3% 이상" },
+    { "metric": "usdkrw_change_rate", "op": "<=", "value": -0.3, "score": 1, "label": "원달러 하락률 -0.3% 이하" }
+  ]
+}

@@ -9,8 +9,11 @@ import requests
 from supabase import create_client
 
 from .common import (
+    build_run_context,
+    build_slot_suffix,
     compute_raw_hash,
     current_timestamp,
+    enrich_row_with_run_context,
     hhmm_from_timestamp,
     load_api_keys_config,
     normalize_signed_number,
@@ -113,15 +116,17 @@ class KISIndexFuturesCollector:
             "custtype": "P",
         }
 
-    def collect(self, trade_date: str | None = None, api_keys_path: str | None = None) -> dict[str, Any]:
+    def collect(self, trade_date: str | None = None, target_slot: str = "0930", api_keys_path: str | None = None, collected_at: str | None = None) -> dict[str, Any]:
         normalized_trade_date = normalize_trade_date(trade_date)
-        collected_at = current_timestamp()
+        collected_at = collected_at or current_timestamp()
+        run_context = build_run_context(trade_date=normalized_trade_date, target_slot=target_slot, collected_at=collected_at)
         raw_dir = self.output_root / "data" / "raw"
         debug_dir = self.output_root / "debug" / "network"
-        json_snapshot_path = raw_dir / f"kis_index_futures_snapshot_{normalized_trade_date.replace('-', '')}.json"
-        csv_snapshot_path = raw_dir / f"kis_index_futures_snapshot_{normalized_trade_date.replace('-', '')}.csv"
-        json_daily_path = raw_dir / f"kis_index_futures_daily_{normalized_trade_date.replace('-', '')}.json"
-        csv_daily_path = raw_dir / f"kis_index_futures_daily_{normalized_trade_date.replace('-', '')}.csv"
+        file_suffix = build_slot_suffix(normalized_trade_date, target_slot)
+        json_snapshot_path = raw_dir / f"kis_index_futures_snapshot_{file_suffix}.json"
+        csv_snapshot_path = raw_dir / f"kis_index_futures_snapshot_{file_suffix}.csv"
+        json_daily_path = raw_dir / f"kis_index_futures_daily_{file_suffix}.json"
+        csv_daily_path = raw_dir / f"kis_index_futures_daily_{file_suffix}.csv"
 
         config, config_path = load_api_keys_config(api_keys_path, self.output_root)
         kis = config.get("kis", {})
@@ -140,6 +145,7 @@ class KISIndexFuturesCollector:
                 source_url=f"{base_url}{PRICE_URL_PATH}",
                 data=[],
                 status="failed",
+                run_context=run_context,
                 error_message=error_message,
                 validation={"valid": False, "errors": [error_message], "row_count": 0},
             )
@@ -152,6 +158,7 @@ class KISIndexFuturesCollector:
                 source_url=f"{base_url}{DAILY_URL_PATH}",
                 data=[],
                 status="failed",
+                run_context=run_context,
                 error_message=error_message,
                 validation={"valid": False, "errors": [error_message], "row_count": 0},
             ))
@@ -242,6 +249,7 @@ class KISIndexFuturesCollector:
                 source_time=output1.get("stck_cntg_hour") or output1.get("oprc_hour") or output1.get("acml_hour"),
             ),
         }
+        snapshot_row = enrich_row_with_run_context(snapshot_row, run_context)
 
         start_date = (date.fromisoformat(normalized_trade_date) - timedelta(days=14)).strftime("%Y%m%d")
         end_date = date.fromisoformat(normalized_trade_date).strftime("%Y%m%d")
@@ -264,7 +272,7 @@ class KISIndexFuturesCollector:
         raw_hash_daily = compute_raw_hash(save_json.__globals__["json"].dumps(daily_payload, ensure_ascii=False))
         for row in daily_payload.get("output2", []) or []:
             daily_rows.append(
-                {
+                enrich_row_with_run_context({
                     "trade_date": normalize_trade_date(row.get("stck_bsop_date"), fallback=date.fromisoformat(normalized_trade_date)),
                     "base_time": hhmm_from_timestamp(collected_at),
                     "base_time_source": "collected_at_fallback",
@@ -282,16 +290,16 @@ class KISIndexFuturesCollector:
                     "source_url": f"{base_url}{DAILY_URL_PATH}",
                     "collected_at": collected_at,
                     "raw_hash": raw_hash_daily,
-                }
+                }, run_context)
             )
 
         validation = validate_kis_futures([snapshot_row])
         status = "success" if validation["valid"] else "failed"
         error_message = None if validation["valid"] else "; ".join(validation["errors"])
 
-        artifacts["debug_board"] = save_json(debug_dir / f"kis_index_futures_board_{normalized_trade_date.replace('-', '')}.json", board_payload)
-        artifacts["debug_price"] = save_json(debug_dir / f"kis_index_futures_price_{normalized_trade_date.replace('-', '')}.json", price_payload)
-        artifacts["debug_daily"] = save_json(debug_dir / f"kis_index_futures_daily_{normalized_trade_date.replace('-', '')}.json", daily_payload)
+        artifacts["debug_board"] = save_json(debug_dir / f"kis_index_futures_board_{file_suffix}.json", board_payload)
+        artifacts["debug_price"] = save_json(debug_dir / f"kis_index_futures_price_{file_suffix}.json", price_payload)
+        artifacts["debug_daily"] = save_json(debug_dir / f"kis_index_futures_daily_{file_suffix}.json", daily_payload)
         artifacts["json_snapshot"] = save_json(
             json_snapshot_path,
             payload_with_status(
@@ -301,6 +309,7 @@ class KISIndexFuturesCollector:
                 source_url=f"{base_url}{PRICE_URL_PATH}",
                 data=[snapshot_row],
                 status=status,
+                run_context=run_context,
                 error_message=error_message,
                 validation=validation,
             ),
@@ -319,6 +328,7 @@ class KISIndexFuturesCollector:
                 source_url=f"{base_url}{DAILY_URL_PATH}",
                 data=daily_rows,
                 status="success" if daily_rows else "failed",
+                run_context=run_context,
                 error_message=None if daily_rows else "No KIS futures daily rows",
                 validation={"valid": bool(daily_rows), "errors": [] if daily_rows else ["No KIS futures daily rows"], "row_count": len(daily_rows)},
             ),

@@ -42,6 +42,7 @@ MAX_RETRIES = 2
 _LAST_REQUEST_BY_DOMAIN: dict[str, float] = {}
 _ROBOTS_CACHE: dict[tuple[str, str], bool | None] = {}
 KST = ZoneInfo("Asia/Seoul")
+VALID_TARGET_SLOTS = ("0930", "1030", "1130", "1230", "1330", "1430", "1530")
 
 
 @dataclass
@@ -49,6 +50,20 @@ class FetchResult:
     response: requests.Response
     attempts: int
     robots_allowed: bool | None
+
+
+@dataclass(frozen=True)
+class DerivativesRunContext:
+    trade_date: str
+    target_slot: str
+    collected_at: str
+    generated_at: str
+    actual_kst_time: str
+    schedule_lag_minutes: int
+    market_session: str
+    source_time: str
+    base_time: str
+    base_time_source: str = "target_slot"
 
 
 def ensure_directory(path: str | Path) -> Path:
@@ -284,6 +299,88 @@ def parse_iso_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(KST)
 
 
+def ensure_target_slot(value: str) -> str:
+    target_slot = normalize_whitespace(value).replace(":", "")
+    if target_slot not in VALID_TARGET_SLOTS:
+        raise ValueError(f"Invalid target_slot: {value}")
+    return target_slot
+
+
+def slot_to_hhmm(target_slot: str) -> str:
+    slot = ensure_target_slot(target_slot)
+    return f"{slot[:2]}:{slot[2:]}"
+
+
+def build_slot_suffix(trade_date: str, target_slot: str) -> str:
+    return f"{normalize_trade_date(trade_date).replace('-', '')}_{ensure_target_slot(target_slot)}"
+
+
+def compute_schedule_lag_minutes(target_slot: str, actual_timestamp: str) -> int:
+    actual_dt = parse_iso_timestamp(actual_timestamp)
+    slot_dt = datetime.combine(actual_dt.date(), datetime.min.time(), tzinfo=KST).replace(
+        hour=int(target_slot[:2]),
+        minute=int(target_slot[2:]),
+    )
+    return max(0, int((actual_dt - slot_dt).total_seconds() // 60))
+
+
+def next_target_slot(target_slot: str) -> str | None:
+    slot = ensure_target_slot(target_slot)
+    try:
+        index = VALID_TARGET_SLOTS.index(slot)
+    except ValueError:
+        return None
+    return VALID_TARGET_SLOTS[index + 1] if index + 1 < len(VALID_TARGET_SLOTS) else None
+
+
+def resolve_target_slot_for_timestamp(timestamp: str) -> str | None:
+    actual_dt = parse_iso_timestamp(timestamp)
+    if actual_dt.weekday() >= 5:
+        return None
+    total_minutes = actual_dt.hour * 60 + actual_dt.minute
+    for slot in VALID_TARGET_SLOTS:
+        slot_minutes = int(slot[:2]) * 60 + int(slot[2:])
+        if slot_minutes - 5 <= total_minutes <= slot_minutes + 19:
+            return slot
+    return None
+
+
+def build_run_context(
+    *,
+    trade_date: str,
+    target_slot: str,
+    collected_at: str,
+    generated_at: str | None = None,
+) -> DerivativesRunContext:
+    normalized_trade_date = normalize_trade_date(trade_date)
+    normalized_target_slot = ensure_target_slot(target_slot)
+    actual_kst_time = hhmm_from_timestamp(collected_at)
+    return DerivativesRunContext(
+        trade_date=normalized_trade_date,
+        target_slot=normalized_target_slot,
+        collected_at=collected_at,
+        generated_at=generated_at or collected_at,
+        actual_kst_time=actual_kst_time,
+        schedule_lag_minutes=compute_schedule_lag_minutes(normalized_target_slot, collected_at),
+        market_session=classify_market_session(slot_to_hhmm(normalized_target_slot)),
+        source_time=slot_to_hhmm(normalized_target_slot),
+        base_time=slot_to_hhmm(normalized_target_slot),
+    )
+
+
+def enrich_row_with_run_context(row: dict[str, Any], run_context: DerivativesRunContext) -> dict[str, Any]:
+    row.setdefault("trade_date", run_context.trade_date)
+    row["target_slot"] = run_context.target_slot
+    row["generated_at"] = run_context.generated_at
+    row["actual_kst_time"] = run_context.actual_kst_time
+    row["schedule_lag_minutes"] = run_context.schedule_lag_minutes
+    row.setdefault("market_session", run_context.market_session)
+    row.setdefault("source_time", run_context.source_time)
+    row.setdefault("base_time", run_context.base_time)
+    row.setdefault("base_time_source", run_context.base_time_source)
+    return row
+
+
 def hhmm_from_timestamp(value: str) -> str:
     return parse_iso_timestamp(value).strftime("%H:%M")
 
@@ -377,12 +474,21 @@ def payload_with_status(
     source_url: str,
     data: list[dict[str, Any]],
     status: str,
+    run_context: DerivativesRunContext | None = None,
     error_message: str | None = None,
     validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "trade_date": trade_date,
+        "target_slot": run_context.target_slot if run_context else None,
+        "generated_at": run_context.generated_at if run_context else collected_at,
         "collected_at": collected_at,
+        "actual_kst_time": run_context.actual_kst_time if run_context else hhmm_from_timestamp(collected_at),
+        "schedule_lag_minutes": run_context.schedule_lag_minutes if run_context else 0,
+        "market_session": run_context.market_session if run_context else classify_market_session(hhmm_from_timestamp(collected_at)),
+        "source_time": run_context.source_time if run_context else hhmm_from_timestamp(collected_at),
+        "base_time": run_context.base_time if run_context else hhmm_from_timestamp(collected_at),
+        "base_time_source": run_context.base_time_source if run_context else "collected_at_fallback",
         "source": source,
         "source_url": source_url,
         "status": status,
