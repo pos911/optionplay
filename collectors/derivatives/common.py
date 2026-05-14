@@ -169,6 +169,28 @@ def normalize_whitespace(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
+def _sanitize_numeric_candidate(cleaned: str) -> str | None:
+    cleaned = cleaned.lstrip("+").replace("--", "-")
+
+    if cleaned in {"", "-", ".", "-."}:
+        return None
+
+    # Date-like fragments can be accidentally extracted from malformed HTML tables.
+    if re.fullmatch(r"\d{4}[-./]\d{1,2}([-.]\d{1,2})?", cleaned):
+        return None
+
+    if cleaned.count(".") > 1:
+        # Accept only a clearly zero-like malformed value such as "0.000.00".
+        if re.fullmatch(r"-?0+(\.0+)+", cleaned):
+            return "0"
+        return None
+
+    if not re.fullmatch(r"-?\d+(\.\d+)?", cleaned):
+        return None
+
+    return cleaned
+
+
 def normalize_signed_number(value: Any) -> int | float | None:
     if value is None:
         return None
@@ -182,15 +204,19 @@ def normalize_signed_number(value: Any) -> int | float | None:
     cleaned = re.sub(r"[+▲▼()％%억원백만원주]", " ", cleaned)
     cleaned = re.sub(r"[^0-9.\-]", " ", cleaned)
     cleaned = normalize_whitespace(cleaned).replace(" ", "")
-    if cleaned in {"", "-", ".", "-."}:
+
+    numeric_candidate = _sanitize_numeric_candidate(cleaned)
+    if numeric_candidate is None:
         return None
 
-    cleaned = cleaned.lstrip("+")
-    cleaned = cleaned.replace("--", "-")
-    if cleaned in {"-0", "-0.0", "0", "0.0"}:
+    if numeric_candidate in {"-0", "-0.0", "0", "0.0"}:
         return 0
 
-    number = float(cleaned)
+    try:
+        number = float(numeric_candidate)
+    except ValueError:
+        return None
+
     number = abs(number) * sign
     if number.is_integer():
         return int(number)
