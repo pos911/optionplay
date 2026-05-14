@@ -36,12 +36,20 @@ STANDARD_NAME_MAP = {
     "코스피 종합": "KOSPI",
     "코스닥 종합": "KOSDAQ",
     "코스피 200": "KOSPI200",
+    "코스피200": "KOSPI200",
     "코스닥 150": "KOSDAQ150",
+    "코스닥150": "KOSDAQ150",
     "KOSPI선물": "KOSPI_FUTURES",
+    "코스피선물": "KOSPI_FUTURES",
     "원/달러": "USDKRW",
+    "USD/KRW": "USDKRW",
     "나스닥 종합": "NASDAQ",
     "S&P 500": "SP500",
 }
+
+DOMESTIC_KEYWORDS = ("코스피", "코스닥", "KOSPI", "KOSDAQ", "선물")
+GLOBAL_KEYWORDS = ("나스닥", "S&P", "다우", "NASDAQ", "DOW", "NIKKEI", "니케이", "상해", "홍콩")
+FX_COMMODITY_KEYWORDS = ("원/달러", "USD", "달러", "유가", "WTI", "환율", "금", "엔/달러")
 
 
 class KBSECMarketIndexCollector:
@@ -61,33 +69,105 @@ class KBSECMarketIndexCollector:
         match = re.search(r"15\s*~\s*20분 지연 또는 종가지수입니다\.", html_text)
         return match.group(0) if match else None
 
+    @staticmethod
+    def _flatten_cell(value: Any) -> str:
+        return normalize_whitespace(value)
+
+    @classmethod
+    def infer_group_name(cls, raw_name: str, table_text: str = "") -> str | None:
+        text = f"{raw_name} {table_text}"
+        if any(keyword in text for keyword in FX_COMMODITY_KEYWORDS):
+            return "FX_COMMODITY"
+        if any(keyword in text for keyword in GLOBAL_KEYWORDS):
+            return "GLOBAL_INDEX"
+        if any(keyword in text for keyword in DOMESTIC_KEYWORDS):
+            return "DOMESTIC_INDEX"
+        return None
+
+    @classmethod
+    def is_index_table(cls, dataframe: pd.DataFrame) -> bool:
+        if dataframe.empty or dataframe.shape[1] < 3:
+            return False
+        table_text = " ".join(normalize_whitespace(cell) for cell in dataframe.astype(str).values.flatten())
+        return cls.infer_group_name(table_text, table_text) is not None
+
+    def _build_row(
+        self,
+        *,
+        html_text: str,
+        trade_date: str,
+        collected_at: str,
+        group_name: str,
+        raw_name: str,
+        current_raw: Any,
+        change_raw: Any,
+        note: str | None,
+    ) -> dict[str, Any] | None:
+        current_value = normalize_signed_number(current_raw)
+        if current_value is None:
+            self.logger.warning(
+                "Skipping KBSEC market index row with invalid current value: name=%s current=%s change=%s",
+                raw_name,
+                current_raw,
+                change_raw,
+            )
+            return None
+
+        change_value, change_rate, direction = parse_change_pair(change_raw)
+        return {
+            "trade_date": trade_date,
+            "group_name": group_name,
+            "index_name": raw_name,
+            "standard_index_name": self.standardize_index_name(raw_name),
+            "current_value": current_value,
+            "change_value": change_value,
+            "change_rate": change_rate,
+            "direction": direction,
+            "unit": None,
+            "raw_note": note,
+            "source": self.source,
+            "source_url": self.url,
+            "collected_at": collected_at,
+            "raw_hash": compute_raw_hash(html_text),
+            **time_fields_for_row(collected_at=collected_at),
+        }
+
     def parse_with_pandas(self, html_text: str, trade_date: str, collected_at: str) -> list[dict[str, Any]]:
         note = self.extract_raw_note(html_text)
         rows: list[dict[str, Any]] = []
-        for group_name, dataframe in zip(GROUPS, pd.read_html(StringIO(html_text))):
+
+        for table_index, dataframe in enumerate(pd.read_html(StringIO(html_text))):
+            if not self.is_index_table(dataframe):
+                self.logger.info("Skipping non-index KBSEC table: table_index=%s shape=%s", table_index, dataframe.shape)
+                continue
+
+            table_text = " ".join(normalize_whitespace(cell) for cell in dataframe.astype(str).values.flatten())
             for _, series in dataframe.iterrows():
-                raw_name = normalize_whitespace(series.iloc[0])
-                current_value = normalize_signed_number(series.iloc[1])
-                change_value, change_rate, direction = parse_change_pair(series.iloc[2])
-                rows.append(
-                    {
-                        "trade_date": trade_date,
-                        "group_name": group_name,
-                        "index_name": raw_name,
-                        "standard_index_name": self.standardize_index_name(raw_name),
-                        "current_value": current_value,
-                        "change_value": change_value,
-                        "change_rate": change_rate,
-                        "direction": direction,
-                        "unit": None,
-                        "raw_note": note,
-                        "source": self.source,
-                        "source_url": self.url,
-                        "collected_at": collected_at,
-                        "raw_hash": compute_raw_hash(html_text),
-                        **time_fields_for_row(collected_at=collected_at),
-                    }
+                if len(series) < 3:
+                    continue
+
+                raw_name = self._flatten_cell(series.iloc[0])
+                if not raw_name:
+                    continue
+
+                group_name = self.infer_group_name(raw_name, table_text)
+                if group_name is None:
+                    self.logger.info("Skipping KBSEC row with non-index name: table_index=%s name=%s", table_index, raw_name)
+                    continue
+
+                row = self._build_row(
+                    html_text=html_text,
+                    trade_date=trade_date,
+                    collected_at=collected_at,
+                    group_name=group_name,
+                    raw_name=raw_name,
+                    current_raw=series.iloc[1],
+                    change_raw=series.iloc[2],
+                    note=note,
                 )
+                if row:
+                    rows.append(row)
+
         return rows
 
     def parse_with_text(self, html_text: str, trade_date: str, collected_at: str) -> list[dict[str, Any]]:
@@ -112,28 +192,19 @@ class KBSECMarketIndexCollector:
                 continue
             if current_group and index + 2 < len(lines):
                 raw_name = token
-                current_value = normalize_signed_number(lines[index + 1])
-                change_value, change_rate, direction = parse_change_pair(lines[index + 2])
-                if current_value is not None and change_value is not None:
-                    rows.append(
-                        {
-                            "trade_date": trade_date,
-                            "group_name": current_group,
-                            "index_name": raw_name,
-                            "standard_index_name": self.standardize_index_name(raw_name),
-                            "current_value": current_value,
-                            "change_value": change_value,
-                            "change_rate": change_rate,
-                            "direction": direction,
-                            "unit": None,
-                            "raw_note": note,
-                            "source": self.source,
-                            "source_url": self.url,
-                            "collected_at": collected_at,
-                            "raw_hash": compute_raw_hash(html_text),
-                            **time_fields_for_row(collected_at=collected_at),
-                        }
-                    )
+                group_name = self.infer_group_name(raw_name, current_group) or current_group
+                row = self._build_row(
+                    html_text=html_text,
+                    trade_date=trade_date,
+                    collected_at=collected_at,
+                    group_name=group_name,
+                    raw_name=raw_name,
+                    current_raw=lines[index + 1],
+                    change_raw=lines[index + 2],
+                    note=note,
+                )
+                if row:
+                    rows.append(row)
                     index += 3
                     continue
             index += 1
